@@ -1,0 +1,32 @@
+[Device] Using: cpu
+
+================================================================================
+🚀 INITIALIZING SHARP MULTI-POLLUTANT FORECAST TRAINER
+================================================================================
+[Dataset Cache] Ingesting real GeoTIFF composites from data/processed into RAM (master grid 256x256)...
+✓ Successfully cached 118 real satellite composites at 256x256 in RAM.
+[TRAIN Dataset] Real GeoTIFFs: 23 temporal sequences x 9 tiles = 207 spatial patches.
+[VAL Dataset] Real GeoTIFFs: 5 temporal sequences x 9 tiles = 45 spatial patches.
+[TEST Dataset] Real GeoTIFFs: 86 temporal sequences x 9 tiles = 774 spatial patches.
+[Model] ST-ResUNet instantiated with 1,386,979 trainable parameters.
+[Config] Mixed Precision (AMP): False | Batch Size: 8
+[Dataset] Real Data Dir: data/processed
+[Split] Train (<=2022): 207 seqs | Val (<=2022): 45 seqs | Test (2023-2024): 774 seqs
+--------------------------------------------------------------------------------
+Epoch [01/35] | Train Loss: 10.5565 (PlumeL1: 9.733, Grad: 2.139, SSIM: 0.910) | Val Loss: 10.3302 | MAE NO2: 8.40e-06, CO: 7.90e-03, SO2: 9.75e-05
+Epoch [05/35] | Train Loss: 6.6871 (PlumeL1: 5.868, Grad: 2.154, SSIM: 0.862) | Val Loss: 7.6864 | MAE NO2: 7.91e-06, CO: 4.82e-03, SO2: 1.21e-04
+Epoch [10/35] | Train Loss: 6.1381 (PlumeL1: 5.329, Grad: 2.126, SSIM: 0.856) | Val Loss: 7.5143 | MAE NO2: 7.26e-06, CO: 4.53e-03, SO2: 1.10e-04
+Epoch [15/35] | Train Loss: 6.0058 (PlumeL1: 5.201, Grad: 2.113, SSIM: 0.857) | Val Loss: 7.2373 | MAE NO2: 7.42e-06, CO: 4.19e-03, SO2: 1.14e-04
+Epoch [20/35] | Train Loss: 5.6980 (PlumeL1: 4.895, Grad: 2.106, SSIM: 0.855) | Val Loss: 7.3629 | MAE NO2: 7.95e-06, CO: 4.34e-03, SO2: 1.12e-04
+Epoch [25/35] | Train Loss: 5.4573 (PlumeL1: 4.659, Grad: 2.094, SSIM: 0.850) | Val Loss: 8.2029 | MAE NO2: 8.07e-06, CO: 5.97e-03, SO2: 1.14e-04
+Epoch [30/35] | Train Loss: 5.2798 (PlumeL1: 4.481, Grad: 2.096, SSIM: 0.850) | Val Loss: 7.9949 | MAE NO2: 7.75e-06, CO: 5.54e-03, SO2: 1.15e-04
+Epoch [35/35] | Train Loss: 5.2150 (PlumeL1: 4.417, Grad: 2.093, SSIM: 0.850) | Val Loss: 7.8705 | MAE NO2: 7.75e-06, CO: 5.30e-03, SO2: 1.15e-04
+--------------------------------------------------------------------------------
+✓ Training Completed in 2789.3s (46.49 mins).
+✓ Best Model Checkpoint Saved: training/checkpoints/best_sharp_forecast_model.pt
+
+[Evaluation] Generating Sharp Comparison Visuals on Strictly Unseen Future Test Step (2023-2024)...
+[Plot Saved] ✓ High-resolution comparison saved to: plots/forecast/forecast_evaluation_sharp.png
+================================================================================
+🎉 ALL COMPLETE: Sharp plumes recovered, blur collapse eliminated!
+================================================================================

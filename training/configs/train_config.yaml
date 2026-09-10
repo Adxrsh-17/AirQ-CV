@@ -1,0 +1,36 @@
+# ST-ResUNet Multi-Pollutant Forecasting Configuration
+data:
+  s2_channels: 12
+  s5p_channels: 3
+  img_h: 128
+  img_w: 128
+  t_in: 4
+  t_out: 1
+  processed_dir: "data/processed"
+  raw_dir: "data/raw"
+
+training:
+  batch_size: 8
+  num_epochs: 35
+  learning_rate: 0.0008
+  weight_decay: 0.0001
+  use_amp: false
+
+loss_weights:
+  lambda_plume: 1.0
+  lambda_grad: 0.5
+  lambda_ssim: 0.3
+  plume_gamma: 5.0
+
+scales:
+  no2_scale: 0.0001   # Target range ~ 8e-5 mol/m^2
+  co_scale: 0.05      # Target range ~ 4.5e-2 mol/m^2
+  so2_scale: 0.001    # Target range ~ 8e-4 mol/m^2
+
+paths:
+  checkpoint_dir: "training/checkpoints"
+  checkpoint_file: "training/checkpoints/best_sharp_forecast_model.pt"
+  log_dir: "training/logs"
+  log_file: "training/logs/train.log"
+  plots_dir: "plots"
+  results_dir: "evaluation/results"

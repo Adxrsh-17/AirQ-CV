@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caching and temporary files
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+!training/logs/*.log
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Large Datasets & Binary Satellite Rasters (>100MB / Multi-GB)
+data/raw/
+data/processed/s2_composites/
+data/processed/s5p_composites/
+*.zip
+*.tar.gz
+*.tif
+*.tiff
+
+# OS and Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
