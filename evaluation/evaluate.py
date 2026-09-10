@@ -93,17 +93,19 @@ def run_evaluation(
         )
         loader = torch.utils.data.DataLoader(fold_ds, batch_size=CONFIG["BATCH_SIZE"], shuffle=False)
 
-        fold_preds, fold_trues = [], []
+        fold_preds, fold_trues, fold_masks = [], [], []
         with torch.no_grad():
-            for s5p_in, s2_in, target in loader:
+            for s5p_in, s2_in, target, target_mask in loader:
                 s5p_in, s2_in = s5p_in.to(device), s2_in.to(device)
                 pred = model(s5p_in, s2_in)
                 fold_preds.append(pred.cpu().numpy())
                 fold_trues.append(target.numpy())
+                fold_masks.append(target_mask.numpy())
 
         f_preds = np.concatenate(fold_preds, axis=0)
         f_trues = np.concatenate(fold_trues, axis=0)
-        df_fold = compute_all_metrics(f_trues, f_preds, pollutant_names=pollutants)
+        f_masks = np.concatenate(fold_masks, axis=0)
+        df_fold = compute_all_metrics(f_trues, f_preds, masks=f_masks, pollutant_names=pollutants)
 
         for _, row in df_fold.iterrows():
             pol = row["Target Pollutant"]
@@ -152,18 +154,21 @@ def run_evaluation(
 
     all_preds = []
     all_trues = []
+    all_masks = []
 
     with torch.no_grad():
-        for s5p_in, s2_in, target in test_loader:
+        for s5p_in, s2_in, target, target_mask in test_loader:
             s5p_in, s2_in = s5p_in.to(device), s2_in.to(device)
             pred = model(s5p_in, s2_in)
             all_preds.append(pred.cpu().numpy())
             all_trues.append(target.numpy())
+            all_masks.append(target_mask.numpy())
 
     preds = np.concatenate(all_preds, axis=0)
     trues = np.concatenate(all_trues, axis=0)
+    masks = np.concatenate(all_masks, axis=0)
 
-    metrics_df = compute_all_metrics(trues, preds, pollutant_names=pollutants)
+    metrics_df = compute_all_metrics(trues, preds, masks=masks, pollutant_names=pollutants)
     out_csv = os.path.join(results_dir, "evaluation_metrics.csv")
     metrics_df.to_csv(out_csv, index=False)
 

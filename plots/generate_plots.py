@@ -68,7 +68,7 @@ def generate_all_plots():
     all_trues = []
 
     with torch.no_grad():
-        for s5p_in, s2_in, target in val_loader:
+        for s5p_in, s2_in, target, *_ in val_loader:
             s5p_in, s2_in = s5p_in.to(DEVICE), s2_in.to(DEVICE)
             pred = model(s5p_in, s2_in)
             all_preds.append(pred.cpu().numpy())

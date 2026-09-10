@@ -104,8 +104,8 @@ CONFIG = {
 
 class SpatialGradientLoss(nn.Module):
     """
-    Computes L1 difference between spatial gradients of predicted and true fields.
-    Forces high-frequency plume edges to remain sharp and prevents Gaussian blur.
+    Computes L1 difference between spatial gradients of predicted and true fields,
+    weighted exclusively over genuine unmasked physical retrieval pixels.
     """
     def __init__(self):
         super().__init__()
@@ -114,7 +114,7 @@ class SpatialGradientLoss(nn.Module):
         self.register_buffer("kernel_x", sobel_x)
         self.register_buffer("kernel_y", sobel_y)
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, mask=None):
         # pred, target: (B, C, H, W)
         b, c, h, w = pred.shape
         kx = self.kernel_x.repeat(c, 1, 1, 1)
@@ -125,15 +125,22 @@ class SpatialGradientLoss(nn.Module):
         grad_target_x = F.conv2d(target, kx, padding=1, groups=c)
         grad_target_y = F.conv2d(target, ky, padding=1, groups=c)
 
-        loss_x = F.l1_loss(grad_pred_x, grad_target_x)
-        loss_y = F.l1_loss(grad_pred_y, grad_target_y)
+        diff_x = torch.abs(grad_pred_x - grad_target_x)
+        diff_y = torch.abs(grad_pred_y - grad_target_y)
+
+        if mask is not None:
+            m_sum = mask.sum() + 1e-8
+            loss_x = (diff_x * mask).sum() / m_sum
+            loss_y = (diff_y * mask).sum() / m_sum
+        else:
+            loss_x = diff_x.mean()
+            loss_y = diff_y.mean()
         return loss_x + loss_y
 
 
 class DifferentiableSSIMLoss(nn.Module):
     """
-    Differentiable Structural Similarity (SSIM) Loss.
-    Ensures spatial structure, plume contrast, and localized patterns are retained.
+    Differentiable Structural Similarity (SSIM) Loss computed strictly on valid observation regions.
     """
     def __init__(self, window_size=7):
         super().__init__()
@@ -146,7 +153,7 @@ class DifferentiableSSIMLoss(nn.Module):
         kernel = gaussian.mm(gaussian.t()).unsqueeze(0).unsqueeze(0)
         self.register_buffer("kernel", kernel)
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, mask=None):
         b, c, h, w = pred.shape
         k = self.kernel.repeat(c, 1, 1, 1)
 
@@ -167,7 +174,14 @@ class DifferentiableSSIMLoss(nn.Module):
         ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / (
             (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
         )
-        return 1.0 - ssim_map.mean()
+        loss_map = 1.0 - ssim_map
+
+        if mask is not None:
+            w_mask = F.conv2d(mask, k, padding=self.window_size // 2, groups=c)
+            valid_w = (w_mask > 0.3).float() * w_mask
+            v_sum = valid_w.sum() + 1e-8
+            return (loss_map * valid_w).sum() / v_sum
+        return loss_map.mean()
 
 
 class PlumePreservingCompoundLoss(nn.Module):
@@ -177,6 +191,7 @@ class PlumePreservingCompoundLoss(nn.Module):
     2. Weights loss on top-tier concentration peaks (factories/plumes) by (1 + gamma * target^2).
     3. Adds Sobel edge loss to stop fuzzy borders.
     4. Adds SSIM loss to preserve multi-scale structure.
+    5. Mask-weighted computation: completely excludes nodata/cloud-screened zeros from penalizing the model.
     """
     def __init__(self, scales, gamma=5.0, lambda_plume=1.0, lambda_grad=0.5, lambda_ssim=0.3):
         super().__init__()
@@ -192,22 +207,27 @@ class PlumePreservingCompoundLoss(nn.Module):
         self.grad_loss = SpatialGradientLoss()
         self.ssim_loss = DifferentiableSSIMLoss()
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, mask=None):
         # Normalize to unit variance / ~[0, 1] space using physical scale constants
         p_norm = pred / (self.scale_tensor + 1e-8)
         t_norm = target / (self.scale_tensor + 1e-8)
 
         # 1. Plume-Weighted Charbonnier Loss
-        # Normalization brings channels to ~Z-score space; allow high peaks up to 10-sigma without harsh clipping
         plume_weight = 1.0 + self.gamma * torch.clamp(F.relu(t_norm), 0.0, 10.0).pow(1.5)
         charbonnier_diff = torch.sqrt((p_norm - t_norm) ** 2 + 1e-6)
-        l_plume = (plume_weight * charbonnier_diff).mean()
+        weighted_diff = plume_weight * charbonnier_diff
+
+        if mask is not None:
+            m_sum = mask.sum() + 1e-8
+            l_plume = (weighted_diff * mask).sum() / m_sum
+        else:
+            l_plume = weighted_diff.mean()
 
         # 2. Spatial Gradient / Edge Loss
-        l_grad = self.grad_loss(p_norm, t_norm)
+        l_grad = self.grad_loss(p_norm, t_norm, mask=mask)
 
         # 3. Structural Similarity Loss
-        l_ssim = self.ssim_loss(p_norm, t_norm)
+        l_ssim = self.ssim_loss(p_norm, t_norm, mask=mask)
 
         total_loss = (
             self.lambda_plume * l_plume +
@@ -423,6 +443,7 @@ class AtmosphericDataset(Dataset):
                 self.df = AtmosphericDataset._cached_data["df"]
                 self.s2_tensors = AtmosphericDataset._cached_data["s2"]
                 self.s5p_tensors = AtmosphericDataset._cached_data["s5p"]
+                self.s5p_mask_tensors = AtmosphericDataset._cached_data["s5p_mask"]
 
                 train_val_seqs = []
                 test_seqs = []
@@ -491,29 +512,36 @@ class AtmosphericDataset(Dataset):
 
         s2_list = []
         s5p_list = []
+        s5p_mask_list = []
         master_h, master_w = 256, 256
 
         for idx, row in df.iterrows():
             with rasterio.open(os.path.join(s2_dir, row["s2_file"])) as src:
                 raw_s2 = src.read().astype(np.float32)
-                raw_s2 = np.where((raw_s2 < 0) | np.isnan(raw_s2) | np.isinf(raw_s2), 0.0, raw_s2)
+                raw_s2 = np.where((raw_s2 <= 0) | np.isnan(raw_s2) | np.isinf(raw_s2), 0.0, raw_s2)
                 t_s2 = torch.from_numpy(raw_s2).clamp(0.0, 1.0)
                 t_s2 = F.interpolate(t_s2.unsqueeze(0), size=(master_h, master_w), mode="bilinear", align_corners=False).squeeze(0)
                 s2_list.append(t_s2)
 
             with rasterio.open(os.path.join(s5p_dir, row["s5p_file"])) as src:
                 raw_s5p = src.read().astype(np.float32)
-                raw_s5p = np.where((raw_s5p < 0) | np.isnan(raw_s5p) | np.isinf(raw_s5p), 0.0, raw_s5p)
+                # True retrieval mask: pixel is valid where raw_s5p > 0 and ~nan and ~inf
+                mask_s5p = ((raw_s5p > 0) & (~np.isnan(raw_s5p)) & (~np.isinf(raw_s5p))).astype(np.float32)
+                raw_s5p = np.where((raw_s5p <= 0) | np.isnan(raw_s5p) | np.isinf(raw_s5p), 0.0, raw_s5p)
                 t_s5p = torch.from_numpy(raw_s5p)
+                t_mask = torch.from_numpy(mask_s5p)
                 t_s5p = F.interpolate(t_s5p.unsqueeze(0), size=(master_h, master_w), mode="bilinear", align_corners=False).squeeze(0)
+                t_mask = F.interpolate(t_mask.unsqueeze(0), size=(master_h, master_w), mode="nearest").squeeze(0)
                 s5p_list.append(t_s5p)
+                s5p_mask_list.append(t_mask)
 
         AtmosphericDataset._cached_data = {
             "df": df,
-            "s2": torch.stack(s2_list),   # (N, 12, 256, 256)
-            "s5p": torch.stack(s5p_list), # (N, 3, 256, 256)
+            "s2": torch.stack(s2_list),            # (N, 12, 256, 256)
+            "s5p": torch.stack(s5p_list),          # (N, 3, 256, 256)
+            "s5p_mask": torch.stack(s5p_mask_list) # (N, 3, 256, 256)
         }
-        print(f"✓ Successfully cached {len(df)} real satellite composites at 256x256 in RAM.")
+        print(f"✓ Successfully cached {len(df)} real satellite composites and retrieval masks at 256x256 in RAM.")
 
     def __len__(self):
         if self.use_real:
@@ -573,6 +601,7 @@ class AtmosphericDataset(Dataset):
             s5p_in = self.s5p_tensors[hist_indices, :, ty:ty+self.h, tx:tx+self.w].clone()
             s2_in  = self.s2_tensors[hist_indices, :, ty:ty+self.h, tx:tx+self.w].clone()
             s5p_target = self.s5p_tensors[target_idx, :, ty:ty+self.h, tx:tx+self.w].clone()
+            target_mask = self.s5p_mask_tensors[target_idx, :, ty:ty+self.h, tx:tx+self.w].clone()
 
             if self.augment:
                 # 1. Random Horizontal Flip
@@ -580,19 +609,22 @@ class AtmosphericDataset(Dataset):
                     s5p_in = torch.flip(s5p_in, dims=[-1])
                     s2_in  = torch.flip(s2_in, dims=[-1])
                     s5p_target = torch.flip(s5p_target, dims=[-1])
+                    target_mask = torch.flip(target_mask, dims=[-1])
                 # 2. Random Vertical Flip
                 if torch.rand(1).item() > 0.5:
                     s5p_in = torch.flip(s5p_in, dims=[-2])
                     s2_in  = torch.flip(s2_in, dims=[-2])
                     s5p_target = torch.flip(s5p_target, dims=[-2])
+                    target_mask = torch.flip(target_mask, dims=[-2])
                 # 3. Random 90-degree Rotation
                 rot_k = torch.randint(0, 4, (1,)).item()
                 if rot_k > 0:
                     s5p_in = torch.rot90(s5p_in, k=rot_k, dims=[-2, -1])
                     s2_in  = torch.rot90(s2_in, k=rot_k, dims=[-2, -1])
                     s5p_target = torch.rot90(s5p_target, k=rot_k, dims=[-2, -1])
+                    target_mask = torch.rot90(target_mask, k=rot_k, dims=[-2, -1])
 
-            return s5p_in, s2_in, s5p_target
+            return s5p_in, s2_in, s5p_target, target_mask
         else:
             sample_seed = idx + (5000 if self.split != "train" else 0)
             s5p_list, s2_list = [], []
@@ -605,7 +637,8 @@ class AtmosphericDataset(Dataset):
             s5p_in = s5p_tensor[:self.t_in]
             s2_in = s2_tensor[:self.t_in]
             s5p_target = s5p_tensor[self.t_in]
-            return s5p_in, s2_in, s5p_target
+            target_mask = torch.ones_like(s5p_target)
+            return s5p_in, s2_in, s5p_target, target_mask
 
 
 # ==============================================================================
@@ -745,16 +778,17 @@ def train_model():
         train_loss = 0.0
         p_loss_total, g_loss_total, s_loss_total = 0.0, 0.0, 0.0
 
-        for s5p_in, s2_in, target in train_loader:
+        for s5p_in, s2_in, target, target_mask in train_loader:
             s5p_in = s5p_in.to(DEVICE, non_blocking=True)
             s2_in  = s2_in.to(DEVICE, non_blocking=True)
             target = target.to(DEVICE, non_blocking=True)
+            target_mask = target_mask.to(DEVICE, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
 
             with torch.cuda.amp.autocast(enabled=CONFIG["USE_AMP"]):
                 pred = model(s5p_in, s2_in)
-                loss, loss_dict = criterion(pred, target)
+                loss, loss_dict = criterion(pred, target, mask=target_mask)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -781,19 +815,24 @@ def train_model():
         val_mae_so2 = 0.0
 
         with torch.no_grad():
-            for s5p_in, s2_in, target in val_loader:
+            for s5p_in, s2_in, target, target_mask in val_loader:
                 s5p_in = s5p_in.to(DEVICE, non_blocking=True)
                 s2_in  = s2_in.to(DEVICE, non_blocking=True)
                 target = target.to(DEVICE, non_blocking=True)
+                target_mask = target_mask.to(DEVICE, non_blocking=True)
 
                 with torch.cuda.amp.autocast(enabled=CONFIG["USE_AMP"]):
                     pred = model(s5p_in, s2_in)
-                    loss, _ = criterion(pred, target)
+                    loss, _ = criterion(pred, target, mask=target_mask)
 
                 val_loss += loss.item()
-                val_mae_no2 += F.l1_loss(pred[:, 0], target[:, 0]).item()
-                val_mae_co  += F.l1_loss(pred[:, 1], target[:, 1]).item()
-                val_mae_so2 += F.l1_loss(pred[:, 2], target[:, 2]).item()
+                # Compute masked validation MAE strictly over genuine retrievals
+                diff_no2 = torch.abs(pred[:, 0] - target[:, 0]) * target_mask[:, 0]
+                diff_co  = torch.abs(pred[:, 1] - target[:, 1]) * target_mask[:, 1]
+                diff_so2 = torch.abs(pred[:, 2] - target[:, 2]) * target_mask[:, 2]
+                val_mae_no2 += (diff_no2.sum() / (target_mask[:, 0].sum() + 1e-8)).item()
+                val_mae_co  += (diff_co.sum() / (target_mask[:, 1].sum() + 1e-8)).item()
+                val_mae_so2 += (diff_so2.sum() / (target_mask[:, 2].sum() + 1e-8)).item()
 
         val_loss /= len(val_loader)
         val_mae_no2 /= len(val_loader)
@@ -823,7 +862,7 @@ def train_model():
     model.load_state_dict(torch.load(CONFIG["MODEL_SAVE_PATH"], map_location=DEVICE))
     model.eval()
 
-    sample_s5p_in, sample_s2_in, sample_target = test_dataset[0]
+    sample_s5p_in, sample_s2_in, sample_target, sample_mask = test_dataset[0]
     sample_s5p_in = sample_s5p_in.unsqueeze(0).to(DEVICE)
     sample_s2_in  = sample_s2_in.unsqueeze(0).to(DEVICE)
 

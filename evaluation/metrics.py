@@ -24,7 +24,7 @@ class DifferentiableSSIMLoss(nn.Module):
         kernel = gaussian.mm(gaussian.t()).unsqueeze(0).unsqueeze(0)
         self.register_buffer("kernel", kernel)
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, mask=None):
         b, c, h, w = pred.shape
         k = self.kernel.repeat(c, 1, 1, 1).to(pred.device)
 
@@ -42,15 +42,25 @@ class DifferentiableSSIMLoss(nn.Module):
         c1 = 0.01 ** 2
         c2 = 0.03 ** 2
         ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
-        return 1.0 - ssim_map.mean()
+        loss_map = 1.0 - ssim_map
+
+        if mask is not None:
+            m = mask.to(pred.device)
+            w_mask = F.conv2d(m, k, padding=self.window_size // 2, groups=c)
+            valid_w = (w_mask > 0.3).float() * w_mask
+            v_sum = valid_w.sum() + 1e-8
+            return (loss_map * valid_w).sum() / v_sum
+        return loss_map.mean()
 
 
-def compute_all_metrics(trues, preds, pollutant_names=None):
+def compute_all_metrics(trues, preds, masks=None, pollutant_names=None):
     """
-    Computes standard physical and statistical evaluation metrics.
+    Computes standard physical and statistical evaluation metrics,
+    strictly excluding masked/nodata pixels from MAE, RMSE, R2, Rel-Acc, and SSIM.
     Args:
         trues: (N, 3, H, W) numpy array of true observations
         preds: (N, 3, H, W) numpy array of forecasted predictions
+        masks: (N, 3, H, W) optional boolean/float mask (1 = valid, 0 = nodata)
     Returns:
         pd.DataFrame with Mean True Obs, MAE, RMSE, R2, Rel-Acc, and SSIM.
     """
@@ -64,25 +74,51 @@ def compute_all_metrics(trues, preds, pollutant_names=None):
         p = preds[:, c].flatten()
         t = trues[:, c].flatten()
 
-        valid = (~np.isnan(t)) & (~np.isnan(p)) & (~np.isinf(t)) & (~np.isinf(p))
+        # Build mask: exclude NaNs, Infs, and zero-padded nodata
+        if masks is not None:
+            m = masks[:, c].flatten()
+            valid = (~np.isnan(t)) & (~np.isnan(p)) & (~np.isinf(t)) & (~np.isinf(p)) & (m > 0.5) & (t > 0)
+        else:
+            valid = (~np.isnan(t)) & (~np.isnan(p)) & (~np.isinf(t)) & (~np.isinf(p)) & (t > 0)
+
         t_val = t[valid]
         p_val = p[valid]
 
-        mean_true = np.mean(t_val)
-        mae = np.mean(np.abs(p_val - t_val))
-        rmse = np.sqrt(np.mean((p_val - t_val) ** 2))
-        ss_tot = np.sum((t_val - mean_true) ** 2)
-        ss_res = np.sum((t_val - p_val) ** 2)
-        r2 = 1.0 - (ss_res / (ss_tot + 1e-10))
-        rel_acc = max(0.0, (1.0 - mae / (abs(mean_true) + 1e-10))) * 100.0
+        if len(t_val) == 0:
+            mean_true = 0.0
+            mae = 0.0
+            rmse = 0.0
+            r2 = 0.0
+            rel_acc = 0.0
+        else:
+            mean_true = np.mean(t_val)
+            mae = np.mean(np.abs(p_val - t_val))
+            rmse = np.sqrt(np.mean((p_val - t_val) ** 2))
+            ss_tot = np.sum((t_val - mean_true) ** 2)
+            ss_res = np.sum((t_val - p_val) ** 2)
+            r2 = 1.0 - (ss_res / (ss_tot + 1e-10))
+            rel_acc = max(0.0, (1.0 - mae / (abs(mean_true) + 1e-10))) * 100.0
 
-        # SSIM calculation (normalized channel)
-        p_t = torch.from_numpy(preds[:, c:c+1])
-        t_t = torch.from_numpy(trues[:, c:c+1])
-        t_min, t_max = t_t.min(), t_t.max()
+        # SSIM calculation (normalized channel, masked)
+        p_t = torch.from_numpy(preds[:, c:c+1]).float()
+        t_t = torch.from_numpy(trues[:, c:c+1]).float()
+
+        if len(t_val) > 0:
+            t_min, t_max = float(t_val.min()), float(t_val.max())
+        else:
+            t_min, t_max = float(t_t.min()), float(t_t.max())
+
         p_norm = (p_t - t_min) / (t_max - t_min + 1e-8)
         t_norm = (t_t - t_min) / (t_max - t_min + 1e-8)
-        ssim_val = 1.0 - ssim_module(p_norm, t_norm).item()
+
+        if masks is not None:
+            m_t = torch.from_numpy(masks[:, c:c+1]).float()
+            ssim_loss = ssim_module(p_norm, t_norm, mask=m_t).item()
+        else:
+            m_t = (t_t > 0).float()
+            ssim_loss = ssim_module(p_norm, t_norm, mask=m_t).item()
+
+        ssim_val = max(0.0, 1.0 - ssim_loss)
 
         records.append({
             "Target Pollutant": name,
