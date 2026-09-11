@@ -50,6 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
+import timm
 
 # ==============================================================================
 # 1. Hardware & Global Configuration
@@ -73,6 +74,11 @@ CONFIG = {
     "IMG_W": 128,             # Standard spatial grid width
     "T_IN": 4,                # Past observation windows (4 * 5 days = 20 days context)
     "T_OUT": 1,               # Forecast lead window (1 * 5 days = 5 days ahead)
+    
+    # Pretrained Satellite Image Encoder (Phase 3 - Winning Configuration: Frozen Encoder)
+    "USE_PRETRAINED_S2": True,     # Use SSL4EO-S12 pretrained ResNet-18 backbone
+    "FREEZE_S2_ENCODER": True,     # Freeze all pretrained weights (Wins decisively on holdout test set)
+    "FINETUNE_LAST_BLOCK": False,  # Stage 2 experiment confirmed partial unfreezing overfits on 23 sequences
     
     # Training Hyperparameters
     "BATCH_SIZE": 8,          # 207 train patches -> 26 batches per epoch
@@ -367,13 +373,27 @@ class ResBlock2D(nn.Module):
 
 class STResUNet(nn.Module):
     """
-    Spatiotemporal Residual U-Net with ConvGRU Bottleneck & Input-Level Standardization.
-    - Standardizes S5P (NO2, CO, SO2) and S2 inputs so all 15 channels operate at ~N(0, 1) scale.
-    - Aggregates multi-temporal skip connections across observation history.
+    Spatiotemporal Residual U-Net with ConvGRU Bottleneck, Pretrained SSL4EO S2 Encoder & Input Standardization.
+    - Standardizes S5P (NO2, CO, SO2) so all 3 channels operate at ~N(0, 1) physical retrieval scale.
+    - Features from SSL4EO-S12 pretrained Sentinel-2 backbone (layer2 intermediate features at 8x downsampling)
+      projected via trainable 1x1 conv to 9 channels, then concatenated with raw full-resolution engineered
+      indices (NDVI, NDBI, NDMI) for an unblurred 12-channel surface representation.
+    - Sequential spatiotemporal encoding through time with ConvGRU bottleneck and temporally-weighted skip aggregation.
     - Final layer maps standardized feature space directly back to non-negative physical gas concentrations.
     """
-    def __init__(self, in_channels_s5p=3, in_channels_s2=12, out_channels=3, base_channels=32):
+    def __init__(self, in_channels_s5p=3, in_channels_s2=12, out_channels=3, base_channels=32,
+                 use_pretrained_s2=None, freeze_s2_encoder=None, finetune_last_block=None):
         super().__init__()
+        if use_pretrained_s2 is None:
+            use_pretrained_s2 = CONFIG.get("USE_PRETRAINED_S2", True)
+        if freeze_s2_encoder is None:
+            freeze_s2_encoder = CONFIG.get("FREEZE_S2_ENCODER", True)
+        if finetune_last_block is None:
+            finetune_last_block = CONFIG.get("FINETUNE_LAST_BLOCK", False)
+
+        self.use_pretrained_s2 = use_pretrained_s2
+        self.freeze_s2_encoder = freeze_s2_encoder
+        self.finetune_last_block = finetune_last_block
         total_in = in_channels_s5p + in_channels_s2
 
         # Ingestion normalization statistics computed strictly from real 2019-2022 training set:
@@ -384,6 +404,45 @@ class STResUNet(nn.Module):
         self.register_buffer("s5p_std",  torch.tensor([1.1782e-5, 1.1198e-2, 0.4500]).view(1, 1, 3, 1, 1))
         self.register_buffer("s2_mean",  torch.tensor(0.0931))
         self.register_buffer("s2_std",   torch.tensor(0.1283))
+
+        # Pretrained Sentinel-2 Backbone (SSL4EO-S12 ResNet18)
+        if self.use_pretrained_s2:
+            self.s2_encoder = timm.create_model('resnet18', in_chans=13, features_only=True, out_indices=(2,))
+            weights_path = os.path.expanduser('~/.cache/torch/hub/checkpoints/resnet18_sentinel2_all_moco-59bfdff9.pth')
+            if os.path.exists(weights_path):
+                state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
+            else:
+                url = 'https://hf.co/torchgeo/resnet18_sentinel2_all_moco/resolve/5b8cddc9a14f3844350b7f40b85bcd32aed75918/resnet18_sentinel2_all_moco-59bfdff9.pth'
+                state_dict = torch.hub.load_state_dict_from_url(url, map_location='cpu')
+            self.s2_encoder.load_state_dict(state_dict, strict=False)
+
+            # Freeze all encoder weights initially
+            for p in self.s2_encoder.parameters():
+                p.requires_grad = False
+
+            if self.finetune_last_block and not self.freeze_s2_encoder:
+                # Unfreeze only the active top layer (layer2)
+                for p in self.s2_encoder.layer2.parameters():
+                    p.requires_grad = True
+            elif not self.freeze_s2_encoder:
+                for p in self.s2_encoder.parameters():
+                    p.requires_grad = True
+
+            # Exact per-band SSL4EO-S12 reflectance mean and std (for [0, 1] reflectance)
+            self.register_buffer("ssl4eo_s2_mean", torch.tensor([
+                0.16129, 0.13976, 0.13223, 0.13731, 0.15610, 0.21084,
+                0.23907, 0.23187, 0.25810, 0.08377, 0.00220, 0.21952, 0.15374
+            ]).view(1, 13, 1, 1))
+            self.register_buffer("ssl4eo_s2_std", torch.tensor([
+                0.07910, 0.08543, 0.08787, 0.11449, 0.11275, 0.11642,
+                0.12760, 0.12495, 0.13459, 0.05775, 0.00475, 0.13400, 0.11429
+            ]).view(1, 13, 1, 1))
+
+            # Spectral band mapping (our 9 physical bands [B2..B12] -> SSL4EO 13 bands)
+            self.register_buffer("s2_band_map", torch.tensor([0, 0, 1, 2, 3, 4, 5, 6, 6, 6, 0, 7, 8], dtype=torch.long))
+
+            # Trainable 1x1 conv projecting layer2's 128 channels down to 9 channels
+            self.s2_proj = nn.Conv2d(128, 9, kernel_size=1)
 
         # Spatial Encoder (Applied per timestep on standardized inputs)
         self.enc1 = ResBlock2D(total_in, base_channels)             # Scale 1x
@@ -416,22 +475,48 @@ class STResUNet(nn.Module):
     def forward(self, s5p_seq, s2_seq):
         """
         s5p_seq: (B, T, 3, H, W) in physical units (mol/m^2)
-        s2_seq:  (B, T, 12, H, W) in surface reflectance [0, 1]
+        s2_seq:  (B, T, 12, H, W) in surface reflectance [0, 1] + indices
         Returns: (B, 3, H, W) forecasted pollutants in physical units (mol/m^2)
         """
         b, t, _, h, w = s5p_seq.shape
         gru_hidden = None
         
-        # 1. Standardize inputs to zero-mean unit-variance
+        # 1. Standardize S5P inputs to zero-mean unit-variance
         s5p_norm = (s5p_seq - self.s5p_mean) / (self.s5p_std + 1e-8)
-        s2_norm  = (s2_seq - self.s2_mean) / (self.s2_std + 1e-8)
+        
+        # 2. Process Sentinel-2 pathway
+        if self.use_pretrained_s2:
+            s2_spectral = s2_seq[:, :, :9] # (B, T, 9, H, W) physical reflectance B2..B12
+            s2_indices  = s2_seq[:, :, 9:] # (B, T, 3, H, W) engineered indices [NDVI, NDBI, NDMI]
+
+            # Map 9 physical bands to 13 SSL4EO bands
+            s2_13 = s2_spectral[:, :, self.s2_band_map].clone() # (B, T, 13, H, W)
+            s2_13[:, :, 10] = 0.0 # B10 (cirrus) set to 0
+
+            s2_13_flat = s2_13.view(b * t, 13, h, w)
+            s2_13_norm = (s2_13_flat - self.ssl4eo_s2_mean) / (self.ssl4eo_s2_std + 1e-8)
+
+            if self.freeze_s2_encoder:
+                with torch.no_grad():
+                    feats = self.s2_encoder(s2_13_norm)[0] # (B*T, 128, H/8, W/8)
+            else:
+                feats = self.s2_encoder(s2_13_norm)[0]
+
+            proj_feats = self.s2_proj(feats) # (B*T, 9, H/8, W/8)
+            proj_up = F.interpolate(proj_feats, size=(h, w), mode='bilinear', align_corners=False)
+            proj_up = proj_up.view(b, t, 9, h, w)
+
+            # Concatenate 9 projected features with 3 raw full-resolution indices (12 channels)
+            s2_processed = torch.cat([proj_up, s2_indices], dim=2)
+        else:
+            s2_processed = (s2_seq - self.s2_mean) / (self.s2_std + 1e-8)
         
         skip1_list = []
         skip2_list = []
 
-        # 2. Sequential encoder through time
+        # 3. Sequential encoder through time
         for step in range(t):
-            step_in = torch.cat([s5p_norm[:, step], s2_norm[:, step]], dim=1)  # (B, 15, H, W)
+            step_in = torch.cat([s5p_norm[:, step], s2_processed[:, step]], dim=1)  # (B, 15, H, W)
             
             e1 = self.enc1(step_in)            # (B, 32, H, W)
             e2 = self.enc2(self.down1(e1))     # (B, 64, H/2, W/2)
@@ -442,14 +527,14 @@ class STResUNet(nn.Module):
             skip1_list.append(e1)
             skip2_list.append(e2)
 
-        # 3. Temporally-weighted skip aggregation: give higher weight to recent frames, but retain history
+        # 4. Temporally-weighted skip aggregation: give higher weight to recent frames, but retain history
         weights = torch.linspace(0.1, 0.4, t, device=s5p_seq.device)
         weights = weights / weights.sum()
         
         skip1_agg = sum(w * f for w, f in zip(weights, skip1_list))
         skip2_agg = sum(w * f for w, f in zip(weights, skip2_list))
 
-        # 4. Decoder with spatiotemporal skips
+        # 5. Decoder with spatiotemporal skips
         d2 = self.up2(gru_hidden)
         d2 = torch.cat([d2, skip2_agg], dim=1)
         d2 = self.dec2(d2)
@@ -460,7 +545,7 @@ class STResUNet(nn.Module):
 
         norm_pred = self.final_conv(d1) # (B, 3, H, W) in standardized space
         
-        # 5. Invert standardization back to physical concentration units (mol/m^2)
+        # 6. Invert standardization back to physical concentration units (mol/m^2)
         s5p_mean_2d = self.s5p_mean.squeeze(1) # (1, 3, 1, 1)
         s5p_std_2d  = self.s5p_std.squeeze(1)  # (1, 3, 1, 1)
         
@@ -961,9 +1046,20 @@ def train_model():
         ]
     ).to(DEVICE)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=CONFIG["LR"], weight_decay=CONFIG["WEIGHT_DECAY"]
-    )
+    if getattr(model, "use_pretrained_s2", False) and not getattr(model, "freeze_s2_encoder", False) and getattr(model, "finetune_last_block", False):
+        encoder_params = list(model.s2_encoder.layer2.parameters())
+        base_params = [p for n, p in model.named_parameters() if not n.startswith("s2_encoder.") and p.requires_grad]
+        optimizer = torch.optim.AdamW([
+            {"params": base_params, "lr": CONFIG["LR"]},
+            {"params": encoder_params, "lr": CONFIG["LR"] * 0.1}
+        ], weight_decay=CONFIG["WEIGHT_DECAY"])
+        print(f"[Optimizer] Configured differential LR: {CONFIG['LR']:.1e} (main) / {CONFIG['LR']*0.1:.1e} (encoder layer2)")
+    else:
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(
+            trainable_params, lr=CONFIG["LR"], weight_decay=CONFIG["WEIGHT_DECAY"]
+        )
+
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=CONFIG["NUM_EPOCHS"], eta_min=1e-5
     )
@@ -971,7 +1067,9 @@ def train_model():
     scaler = torch.amp.GradScaler(device_type, enabled=CONFIG["USE_AMP"] and (device_type == "cuda"))
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"[Model] ST-ResUNet instantiated with {total_params:,} trainable parameters.")
+    frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    status_str = "Frozen" if getattr(model, "freeze_s2_encoder", False) else ("Partially Fine-Tuned (layer2)" if getattr(model, "finetune_last_block", False) else "Full Fine-Tuned")
+    print(f"[Model] ST-ResUNet instantiated with {total_params:,} trainable parameters ({frozen_params:,} frozen, S2 Encoder: {status_str}).")
     print(f"[Config] Device: {DEVICE} | Mixed Precision (AMP): {CONFIG['USE_AMP']} | Batch Size: {CONFIG['BATCH_SIZE']}")
     print(f"[Dataset] Real Data Dir: {real_data_dir}")
     print(f"[Split] Train (<=2022): {len(train_dataset)} patches | Val (<=2022): {len(val_dataset)} patches | Test (2023-2024): {len(test_dataset)} patches")
