@@ -94,11 +94,11 @@ CONFIG = {
         "CO_SCALE":  1.1198e-2,  # Real S5P std from training set (unchanged)
         "SO2_SCALE": 1.2324e-4,  # Clean mask-valid S5P std from training set (recomputed in Step A)
     },
-    # Per-Channel Loss Weights inside PlumePreservingCompoundLoss (proportional to valid pixel count)
+    # Per-Channel Loss Weights inside PlumePreservingCompoundLoss: reverted to 1.0 across all channels
     "CHANNEL_WEIGHTS": {
-        "NO2": 1.0,              # 86.24% valid pixels (unchanged)
-        "CO":  1.0,              # 90.71% valid pixels (unchanged)
-        "SO2": 1.822,            # 48.57% valid pixels (88.48% avg valid / 48.57% = 1.822x multiplier)
+        "NO2": 1.0,              # 86.24% valid pixels
+        "CO":  1.0,              # 90.71% valid pixels
+        "SO2": 1.0,              # Reverted to 1.0 (undo 1.822x multiplier)
     },
     
     # Save Paths
@@ -257,7 +257,7 @@ class PlumePreservingCompoundLoss(nn.Module):
         self.register_buffer("scale_tensor", scale_tensor)
 
         if channel_weights is None:
-            channel_weights = [1.0, 1.0, 1.822]
+            channel_weights = [1.0, 1.0, 1.0]
         c_weights = torch.tensor(channel_weights, dtype=torch.float32).view(1, 3, 1, 1)
         self.register_buffer("channel_weights", c_weights)
         
@@ -978,7 +978,7 @@ def train_model():
     print(f"[Loss Config] Exact S5P Channel Weights inside PlumePreservingCompoundLoss:")
     print(f"  NO2 Weight: {CONFIG['CHANNEL_WEIGHTS']['NO2']:.3f} (86.24% valid pixels)")
     print(f"  CO  Weight: {CONFIG['CHANNEL_WEIGHTS']['CO']:.3f} (90.71% valid pixels)")
-    print(f"  SO2 Weight: {CONFIG['CHANNEL_WEIGHTS']['SO2']:.3f} (48.57% valid pixels, 1.822x boost proportional to sparsity)")
+    print(f"  SO2 Weight: {CONFIG['CHANNEL_WEIGHTS']['SO2']:.3f} (48.57% valid pixels, reverted to 1.0)")
     print(f"[Scale Config] SO2_SCALE updated to clean mask-valid std: {CONFIG['SCALES']['SO2_SCALE']:.4e} mol/m^2")
     print(f"[Transform] Log1p forward transform on SO2 channel, expm1 inversion for metrics & plots")
     print("-" * 80)
