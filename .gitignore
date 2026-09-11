@@ -25,6 +25,8 @@ data/processed/s5p_composites/
 *.tar.gz
 *.tif
 *.tiff
+training/checkpoints/*_step*.pt
+training/checkpoints/*_frozen.pt
 
 # OS and Editor files
 .DS_Store

@@ -19,18 +19,22 @@ An end-to-end deep learning framework for **spatiotemporal atmospheric forecasti
 
 ---
 
-## 📊 Quantitative Benchmarks (Phase 3: Pretrained SSL4EO-S12 Satellite Image Encoder)
+## 📊 Quantitative Benchmarks (Phase 4: Architecture Search & Tap Depth Ablation)
 
 ### 1. Model Comparison on Strictly Unseen Future Test Set (2023–2024, 774 Spatial Patches)
 
-| Model Configuration | $\text{NO}_2$ $R^2$ | $\text{NO}_2$ MAE | $\text{CO}$ $R^2$ | $\text{CO}$ MAE | $\text{SO}_2$ $R^2$ | $\text{SO}_2$ MAE |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Phase 2 Baseline (Raw Input)** | $+0.2226$ | $7.41 \times 10^{-6}\text{ mol/m}^2$ | $+0.3856$ | $3.95 \times 10^{-3}\text{ mol/m}^2$ | $-0.0029$ | $9.88 \times 10^{-5}\text{ mol/m}^2$ |
-| **Phase 3: Stage 1 (Frozen SSL4EO Encoder)** 🏆 | **$+0.2794$** | **$6.99 \times 10^{-6}\text{ mol/m}^2$** | **$+0.4480$** | **$3.82 \times 10^{-3}\text{ mol/m}^2$** | **$+0.0172$** | **$9.89 \times 10^{-5}\text{ mol/m}^2$** |
-| **Phase 3: Stage 2 (Partially Fine-Tuned)** | $+0.2276$ | $7.34 \times 10^{-6}\text{ mol/m}^2$ | $+0.3350$ | $4.19 \times 10^{-3}\text{ mol/m}^2$ | $+0.0065$ | $9.88 \times 10^{-5}\text{ mol/m}^2$ |
+| Model Configuration | Parameters | $\text{NO}_2$ $R^2$ | $\text{NO}_2$ SSIM | $\text{CO}$ $R^2$ | $\text{CO}$ SSIM | $\text{SO}_2$ $R^2$ | $\text{SO}_2$ SSIM | Mean $R^2$ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Phase 2 Baseline (Raw Input)** | $1.38\text{M}$ | $+0.2226$ | $0.8427$ | $+0.3856$ | $0.5517$ | $-0.0029$ | $0.5593$ | $+0.2018$ |
+| **Phase 3 Champion: Frozen `layer2` (8x Tap)** 🏆 | $1.39\text{M}$ | **$+0.2794$** | $0.8468$ | **$+0.4480$** | **$0.5671$** | **$+0.0172$** | $0.5606$ | **$+0.2482$** |
+| **Phase 4 Step A: Attention Gates (`layer2`)** | $1.39\text{M}$ | $+0.2317$ | $0.8423$ | $+0.3101$ | $0.5469$ | $+0.0056$ | $0.5697$ | $+0.1825$ |
+| **Phase 4 Step B: `layer1` Tap (4x Tap, No AG)** | $1.38\text{M}$ | $+0.2909$ | **$0.8502$** | $+0.1733$ | $0.5643$ | $+0.0295$ | **$0.5736$** | $+0.1646$ |
 
 > [!TIP]
-> **Key Finding:** The **Frozen SSL4EO-S12 Pretrained Encoder wins decisively across all three pollutants on unseen holdout test data**. External pretraining on 250,000 Sentinel-2 scenes injects robust spatial priors that regularize the model against our small historical training pool (23 sequences), lifting $\text{SO}_2$ into positive $R^2$ territory ($+0.0172$) and boosting $\text{NO}_2$ ($+0.2794$) and $\text{CO}$ ($+0.4480$). Partially unfreezing `layer2` overfits to the historical training sequences, degrading holdout performance.
+> **Key Architectural Insights:**
+> 1. **Additive Attention Gates (Step A):** Adding Oktay et al. attention gates to U-Net skip connections suppresses diffuse plume boundaries in the low-sample regime (23 sequences), lowering holdout $R^2$ across all three pollutants. Direct concatenation skip connections remain superior.
+> 2. **Encoder Tap Depth Trade-off (Step B):** Tapping `layer1` ($4\times$ downsampling, 64 channels) delivers higher spatial sharpness for localized point-source plumes ($\text{NO}_2$ $R^2$ reaches $+0.2909$ / SSIM $0.8502$; $\text{SO}_2$ reaches $+0.0295$ / SSIM $0.5736$). However, it severely degrades long-range regional transport tracking for $\text{CO}$ ($R^2$ plunges from $+0.4480$ to $+0.1733$) due to smaller receptive field.
+> 3. **The Champion Architecture:** The **Frozen SSL4EO-S12 `layer2` tap ($8\times$ downsampling) with standard concatenation skip connections** achieves the optimal multi-pollutant balance with the highest overall average $R^2$ ($+0.2482$).
 
 ### 2. 5-Fold Cross-Validation Across Historical Sequences (≤ 2022)
 *Grouped by temporal sequence (54 patches/fold, 252 total patches) strictly excluding nodata mask dropouts:*

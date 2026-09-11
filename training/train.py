@@ -75,10 +75,12 @@ CONFIG = {
     "T_IN": 4,                # Past observation windows (4 * 5 days = 20 days context)
     "T_OUT": 1,               # Forecast lead window (1 * 5 days = 5 days ahead)
     
-    # Pretrained Satellite Image Encoder (Phase 3 - Winning Configuration: Frozen Encoder)
+    # Pretrained Satellite Image Encoder & Attention Gates (Phase 4)
     "USE_PRETRAINED_S2": True,     # Use SSL4EO-S12 pretrained ResNet-18 backbone
-    "FREEZE_S2_ENCODER": True,     # Freeze all pretrained weights (Wins decisively on holdout test set)
-    "FINETUNE_LAST_BLOCK": False,  # Stage 2 experiment confirmed partial unfreezing overfits on 23 sequences
+    "FREEZE_S2_ENCODER": True,     # Frozen backbone
+    "FINETUNE_LAST_BLOCK": False,  # No fine-tuning
+    "USE_ATTENTION_GATES": False,  # Champion Architecture: Attention gates disabled (concatenation baseline wins)
+    "S2_ENCODER_TAP": "layer2",    # Champion Architecture: layer2 tap (8x downsampling, 128 channels)
     
     # Training Hyperparameters
     "BATCH_SIZE": 8,          # 207 train patches -> 26 batches per epoch
@@ -371,18 +373,46 @@ class ResBlock2D(nn.Module):
         return self.act2(out + res)
 
 
+class AttentionGate(nn.Module):
+    """
+    Additive Attention Gate (Oktay et al., 2018, Attention U-Net).
+    Selectively recalibrates encoder skip-connection features x using decoder gating signal g.
+    Suppresses spatial background noise and highlights sparse industrial plume structures before concatenation.
+    """
+    def __init__(self, in_channels_x, in_channels_g, inter_channels=None):
+        super().__init__()
+        if inter_channels is None:
+            inter_channels = max(in_channels_x // 2, 16)
+        self.Wx = nn.Conv2d(in_channels_x, inter_channels, kernel_size=1, bias=True)
+        self.Wg = nn.Conv2d(in_channels_g, inter_channels, kernel_size=1, bias=True)
+        self.psi = nn.Conv2d(inter_channels, 1, kernel_size=1, bias=True)
+        self.relu = nn.ReLU(inplace=True)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, g):
+        # x: skip connection (B, C_x, H, W)
+        # g: decoder gating signal (B, C_g, H, W)
+        theta_x = self.Wx(x)
+        phi_g = self.Wg(g)
+        f = self.relu(theta_x + phi_g)
+        alpha = self.sigmoid(self.psi(f))
+        return x * alpha
+
+
 class STResUNet(nn.Module):
     """
-    Spatiotemporal Residual U-Net with ConvGRU Bottleneck, Pretrained SSL4EO S2 Encoder & Input Standardization.
+    Spatiotemporal Residual U-Net with ConvGRU Bottleneck, Pretrained SSL4EO S2 Encoder & Attention-Gated Skips.
     - Standardizes S5P (NO2, CO, SO2) so all 3 channels operate at ~N(0, 1) physical retrieval scale.
-    - Features from SSL4EO-S12 pretrained Sentinel-2 backbone (layer2 intermediate features at 8x downsampling)
+    - Features from SSL4EO-S12 pretrained Sentinel-2 backbone (layer1 or layer2 tap)
       projected via trainable 1x1 conv to 9 channels, then concatenated with raw full-resolution engineered
       indices (NDVI, NDBI, NDMI) for an unblurred 12-channel surface representation.
     - Sequential spatiotemporal encoding through time with ConvGRU bottleneck and temporally-weighted skip aggregation.
+    - Optional Attention Gates on U-Net skip connections to suppress non-plume background noise before fusion.
     - Final layer maps standardized feature space directly back to non-negative physical gas concentrations.
     """
     def __init__(self, in_channels_s5p=3, in_channels_s2=12, out_channels=3, base_channels=32,
-                 use_pretrained_s2=None, freeze_s2_encoder=None, finetune_last_block=None):
+                 use_pretrained_s2=None, freeze_s2_encoder=None, finetune_last_block=None,
+                 use_attention_gates=None, s2_encoder_tap=None):
         super().__init__()
         if use_pretrained_s2 is None:
             use_pretrained_s2 = CONFIG.get("USE_PRETRAINED_S2", True)
@@ -390,16 +420,19 @@ class STResUNet(nn.Module):
             freeze_s2_encoder = CONFIG.get("FREEZE_S2_ENCODER", True)
         if finetune_last_block is None:
             finetune_last_block = CONFIG.get("FINETUNE_LAST_BLOCK", False)
+        if use_attention_gates is None:
+            use_attention_gates = CONFIG.get("USE_ATTENTION_GATES", False)
+        if s2_encoder_tap is None:
+            s2_encoder_tap = CONFIG.get("S2_ENCODER_TAP", "layer2")
 
         self.use_pretrained_s2 = use_pretrained_s2
         self.freeze_s2_encoder = freeze_s2_encoder
         self.finetune_last_block = finetune_last_block
+        self.use_attention_gates = use_attention_gates
+        self.s2_encoder_tap = s2_encoder_tap
         total_in = in_channels_s5p + in_channels_s2
 
         # Ingestion normalization statistics computed strictly from real 2019-2022 training set:
-        # NO2: mean=1.8459e-5, std=1.1782e-5 (linear physical)
-        # CO:  mean=3.0457e-2, std=1.1198e-2 (linear physical)
-        # SO2: mean=0.7469,    std=0.4500     (in log1p unit space from clean training pixels)
         self.register_buffer("s5p_mean", torch.tensor([1.8459e-5, 3.0457e-2, 0.7469]).view(1, 1, 3, 1, 1))
         self.register_buffer("s5p_std",  torch.tensor([1.1782e-5, 1.1198e-2, 0.4500]).view(1, 1, 3, 1, 1))
         self.register_buffer("s2_mean",  torch.tensor(0.0931))
@@ -407,7 +440,10 @@ class STResUNet(nn.Module):
 
         # Pretrained Sentinel-2 Backbone (SSL4EO-S12 ResNet18)
         if self.use_pretrained_s2:
-            self.s2_encoder = timm.create_model('resnet18', in_chans=13, features_only=True, out_indices=(2,))
+            out_idx = (1,) if self.s2_encoder_tap == "layer1" else (2,)
+            s2_feat_channels = 64 if self.s2_encoder_tap == "layer1" else 128
+
+            self.s2_encoder = timm.create_model('resnet18', in_chans=13, features_only=True, out_indices=out_idx)
             weights_path = os.path.expanduser('~/.cache/torch/hub/checkpoints/resnet18_sentinel2_all_moco-59bfdff9.pth')
             if os.path.exists(weights_path):
                 state_dict = torch.load(weights_path, map_location='cpu', weights_only=True)
@@ -421,8 +457,9 @@ class STResUNet(nn.Module):
                 p.requires_grad = False
 
             if self.finetune_last_block and not self.freeze_s2_encoder:
-                # Unfreeze only the active top layer (layer2)
-                for p in self.s2_encoder.layer2.parameters():
+                # Unfreeze only the active top layer
+                active_layer = self.s2_encoder.layer1 if self.s2_encoder_tap == "layer1" else self.s2_encoder.layer2
+                for p in active_layer.parameters():
                     p.requires_grad = True
             elif not self.freeze_s2_encoder:
                 for p in self.s2_encoder.parameters():
@@ -441,8 +478,8 @@ class STResUNet(nn.Module):
             # Spectral band mapping (our 9 physical bands [B2..B12] -> SSL4EO 13 bands)
             self.register_buffer("s2_band_map", torch.tensor([0, 0, 1, 2, 3, 4, 5, 6, 6, 6, 0, 7, 8], dtype=torch.long))
 
-            # Trainable 1x1 conv projecting layer2's 128 channels down to 9 channels
-            self.s2_proj = nn.Conv2d(128, 9, kernel_size=1)
+            # Trainable 1x1 conv projecting encoder features down to 9 channels
+            self.s2_proj = nn.Conv2d(s2_feat_channels, 9, kernel_size=1)
 
         # Spatial Encoder (Applied per timestep on standardized inputs)
         self.enc1 = ResBlock2D(total_in, base_channels)             # Scale 1x
@@ -458,6 +495,19 @@ class STResUNet(nn.Module):
             kernel_size=3
         )
         
+        # Optional Attention Gates on Skip Connections (Oktay et al., 2018)
+        if self.use_attention_gates:
+            self.gate2 = AttentionGate(
+                in_channels_x=base_channels * 2,
+                in_channels_g=base_channels * 2,
+                inter_channels=base_channels
+            )
+            self.gate1 = AttentionGate(
+                in_channels_x=base_channels,
+                in_channels_g=base_channels,
+                inter_channels=base_channels // 2
+            )
+
         # Spatial Decoder (with multi-temporal aggregated skip connections)
         self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2)
         self.dec2 = ResBlock2D(base_channels * 4, base_channels * 2)
@@ -498,11 +548,11 @@ class STResUNet(nn.Module):
 
             if self.freeze_s2_encoder:
                 with torch.no_grad():
-                    feats = self.s2_encoder(s2_13_norm)[0] # (B*T, 128, H/8, W/8)
+                    feats = self.s2_encoder(s2_13_norm)[0] # (B*T, C_feat, H_feat, W_feat)
             else:
                 feats = self.s2_encoder(s2_13_norm)[0]
 
-            proj_feats = self.s2_proj(feats) # (B*T, 9, H/8, W/8)
+            proj_feats = self.s2_proj(feats) # (B*T, 9, H_feat, W_feat)
             proj_up = F.interpolate(proj_feats, size=(h, w), mode='bilinear', align_corners=False)
             proj_up = proj_up.view(b, t, 9, h, w)
 
@@ -534,13 +584,21 @@ class STResUNet(nn.Module):
         skip1_agg = sum(w * f for w, f in zip(weights, skip1_list))
         skip2_agg = sum(w * f for w, f in zip(weights, skip2_list))
 
-        # 5. Decoder with spatiotemporal skips
+        # 5. Decoder with spatiotemporal skips (optionally filtered by Attention Gates)
         d2 = self.up2(gru_hidden)
-        d2 = torch.cat([d2, skip2_agg], dim=1)
+        if self.use_attention_gates:
+            skip2_filtered = self.gate2(skip2_agg, d2)
+            d2 = torch.cat([d2, skip2_filtered], dim=1)
+        else:
+            d2 = torch.cat([d2, skip2_agg], dim=1)
         d2 = self.dec2(d2)
 
         d1 = self.up1(d2)
-        d1 = torch.cat([d1, skip1_agg], dim=1)
+        if self.use_attention_gates:
+            skip1_filtered = self.gate1(skip1_agg, d1)
+            d1 = torch.cat([d1, skip1_filtered], dim=1)
+        else:
+            d1 = torch.cat([d1, skip1_agg], dim=1)
         d1 = self.dec1(d1)
 
         norm_pred = self.final_conv(d1) # (B, 3, H, W) in standardized space
@@ -1068,8 +1126,10 @@ def train_model():
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    status_str = "Frozen" if getattr(model, "freeze_s2_encoder", False) else ("Partially Fine-Tuned (layer2)" if getattr(model, "finetune_last_block", False) else "Full Fine-Tuned")
-    print(f"[Model] ST-ResUNet instantiated with {total_params:,} trainable parameters ({frozen_params:,} frozen, S2 Encoder: {status_str}).")
+    status_str = "Frozen" if getattr(model, "freeze_s2_encoder", False) else ("Partially Fine-Tuned" if getattr(model, "finetune_last_block", False) else "Full Fine-Tuned")
+    ag_str = "Enabled" if getattr(model, "use_attention_gates", False) else "Disabled"
+    tap_str = getattr(model, "s2_encoder_tap", "layer2")
+    print(f"[Model] ST-ResUNet instantiated with {total_params:,} trainable parameters ({frozen_params:,} frozen | S2 Tap: {tap_str} | S2 Encoder: {status_str} | Attention Gates: {ag_str}).")
     print(f"[Config] Device: {DEVICE} | Mixed Precision (AMP): {CONFIG['USE_AMP']} | Batch Size: {CONFIG['BATCH_SIZE']}")
     print(f"[Dataset] Real Data Dir: {real_data_dir}")
     print(f"[Split] Train (<=2022): {len(train_dataset)} patches | Val (<=2022): {len(val_dataset)} patches | Test (2023-2024): {len(test_dataset)} patches")

@@ -1,0 +1,4 @@
+Target Pollutant,Mean True Obs,MAE,RMSE,R² Score,Relative Accuracy,Spatial SSIM
+NO2 (mol/m²),2.1307e-05,7.2855e-06,9.7030e-06,0.2317,65.81%,0.8423
+CO (mol/m²),3.3067e-02,4.2965e-03,5.6042e-03,0.3101,87.01%,0.5469
+SO2 (mol/m²),1.4300e-04,9.6429e-05,1.3938e-04,0.0056,32.57%,0.5697
