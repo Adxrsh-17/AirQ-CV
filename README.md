@@ -19,24 +19,24 @@ An end-to-end deep learning framework for **spatiotemporal atmospheric forecasti
 
 ---
 
-## 📊 Quantitative Benchmarks
+## 📊 Quantitative Benchmarks (Phase 2: SO₂ Log-Compression & Loss Re-Weighting)
 
-### 1. 5-Fold Cross-Validation Across Historical Sequences ($\le 2022$)
+### 1. 5-Fold Cross-Validation Across Historical Sequences (≤ 2022)
 *Grouped by temporal sequence (54 patches/fold, 252 total patches) strictly excluding nodata mask dropouts:*
 
-| Target Pollutant | MAE ($\text{Mean} \pm \text{Std}$) | RMSE ($\text{Mean} \pm \text{Std}$) | $R^2$ Score ($\text{Mean} \pm \text{Std}$) | Relative Accuracy | Spatial SSIM |
+| Target Pollutant | MAE ($\text{Mean} \pm \text{Std}$) | RMSE ($\text{Mean} \pm \text{Std}$) | $R^2$ Score ($\text{Mean} \pm \text{Std}$) | Relative Accuracy ($\pm 25\%$) | Spatial SSIM |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **$\text{NO}_2$ (Nitrogen Dioxide)** | **$6.24 \times 10^{-6} \pm 5.94 \times 10^{-7}\text{ mol/m}^2$** | $8.54 \times 10^{-6} \pm 6.76 \times 10^{-7}$ | **$+0.251 \pm 0.116$** | **$71.92\% \pm 3.94\%$** | **$0.819 \pm 0.056$** |
-| **$\text{CO}$ (Carbon Monoxide)** | **$2.92 \times 10^{-3} \pm 9.50 \times 10^{-4}\text{ mol/m}^2$** | $3.83 \times 10^{-3} \pm 9.52 \times 10^{-4}$ | **$+0.149 \pm 0.272$** | **$91.14\% \pm 1.67\%$** | **$0.744 \pm 0.039$** |
-| **$\text{SO}_2$ (Sulfur Dioxide)** | **$1.23 \times 10^{-4} \pm 1.16 \times 10^{-5}\text{ mol/m}^2$** | $1.47 \times 10^{-4} \pm 1.18 \times 10^{-5}$ | **$-0.393 \pm 0.117$** | **$13.61\% \pm 10.16\%$** | **$0.385 \pm 0.118$** |
+| **$\text{NO}_2$ (Nitrogen Dioxide)** | $(7.000 \pm 0.562) \times 10^{-6}\text{ mol/m}^2$ | $(9.217 \pm 0.638) \times 10^{-6}$ | $+0.131 \pm 0.112$ | $68.52\% \pm 3.99\%$ | $0.797 \pm 0.056$ |
+| **$\text{CO}$ (Carbon Monoxide)** | $(4.174 \pm 1.200) \times 10^{-3}\text{ mol/m}^2$ | $(5.288 \pm 1.320) \times 10^{-3}$ | $-0.627 \pm 0.589$ | $87.36\% \pm 1.75\%$ | $0.331 \pm 0.033$ |
+| **$\text{SO}_2$ (Sulfur Dioxide)** | **$(9.602 \pm 0.298) \times 10^{-5}\text{ mol/m}^2$** | **$(1.289 \pm 0.027) \times 10^{-4}$** | **$-0.075 \pm 0.076$** | **$32.35\% \pm 5.09\%$** | **$0.430 \pm 0.108$** |
 
 ### 2. Strictly Unseen Future Test Set ($2023\text{–}2024$, 774 Spatial Patches)
 
-| Target Pollutant | Mean True Observation | Mean Absolute Error ($\text{MAE}$) | Root Mean Squared Error ($\text{RMSE}$) | $R^2$ Score | Relative Accuracy | Spatial SSIM |
+| Target Pollutant | Mean True Observation | Mean Absolute Error ($\text{MAE}$) | Root Mean Squared Error ($\text{RMSE}$) | $R^2$ Score | Relative Accuracy ($\pm 25\%$) | Spatial SSIM |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **$\text{NO}_2$ (Nitrogen Dioxide)** | $2.13 \times 10^{-5}\text{ mol/m}^2$ | **$6.93 \times 10^{-6}\text{ mol/m}^2$** | $9.34 \times 10^{-6}\text{ mol/m}^2$ | **$+0.2885$** | **$67.48\%$** | **$0.8517$** |
-| **$\text{CO}$ (Carbon Monoxide)** | $3.31 \times 10^{-2}\text{ mol/m}^2$ | **$3.69 \times 10^{-3}\text{ mol/m}^2$** | $4.93 \times 10^{-3}\text{ mol/m}^2$ | **$+0.4659$** | **$88.85\%$** | **$0.8067$** |
-| **$\text{SO}_2$ (Sulfur Dioxide)** | $1.43 \times 10^{-4}\text{ mol/m}^2$ | **$1.27 \times 10^{-4}\text{ mol/m}^2$** | $1.58 \times 10^{-4}\text{ mol/m}^2$ | **$-0.2704$** | **$11.41\%$** | **$0.4989$** |
+| **$\text{NO}_2$ (Nitrogen Dioxide)** | $2.13 \times 10^{-5}\text{ mol/m}^2$ | $7.65 \times 10^{-6}\text{ mol/m}^2$ | $9.98 \times 10^{-6}\text{ mol/m}^2$ | $+0.1880$ | $64.08\%$ | $0.8324$ |
+| **$\text{CO}$ (Carbon Monoxide)** | $3.31 \times 10^{-2}\text{ mol/m}^2$ | $4.18 \times 10^{-3}\text{ mol/m}^2$ | $5.53 \times 10^{-3}\text{ mol/m}^2$ | $+0.3283$ | $87.36\%$ | $0.4593$ |
+| **$\text{SO}_2$ (Sulfur Dioxide)** | $1.43 \times 10^{-4}\text{ mol/m}^2$ | **$1.00 \times 10^{-4}\text{ mol/m}^2$** | **$1.41 \times 10^{-4}\text{ mol/m}^2$** | **$-0.0164$** | **$30.07\%$** | **$0.5587$** |
 
 ---
 

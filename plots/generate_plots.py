@@ -33,7 +33,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 import torch
-from training.train import STResUNet, AtmosphericDataset, CONFIG, DEVICE
+from training.train import STResUNet, AtmosphericDataset, CONFIG, DEVICE, invert_so2_prediction
 
 def generate_all_plots():
     print("=" * 75)
@@ -71,8 +71,10 @@ def generate_all_plots():
         for s5p_in, s2_in, target, *_ in val_loader:
             s5p_in, s2_in = s5p_in.to(DEVICE), s2_in.to(DEVICE)
             pred = model(s5p_in, s2_in)
-            all_preds.append(pred.cpu().numpy())
-            all_trues.append(target.numpy())
+            pred_phys = invert_so2_prediction(pred)
+            target_phys = invert_so2_prediction(target)
+            all_preds.append(pred_phys.cpu().numpy())
+            all_trues.append(target_phys.numpy())
 
     preds = np.concatenate(all_preds, axis=0) # (32, 3, H, W)
     trues = np.concatenate(all_trues, axis=0) # (32, 3, H, W)

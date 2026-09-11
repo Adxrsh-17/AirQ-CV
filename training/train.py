@@ -59,6 +59,10 @@ print(f"[Device] Using: {DEVICE}")
 if torch.cuda.is_available():
     print(f"[Device] GPU Model: {torch.cuda.get_device_name(0)}")
     print(f"[Device] VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+else:
+    num_threads = min(12, os.cpu_count() or 8)
+    torch.set_num_threads(num_threads)
+    print(f"[Device] Multi-threaded CPU Acceleration enabled with {num_threads} threads.")
 
 CONFIG = {
     # Data Paths & Dimensions
@@ -76,7 +80,7 @@ CONFIG = {
     "LR": 5e-4,
     "WEIGHT_DECAY": 1e-3,     # 10x higher weight decay to regularize against overfitting
     "DROPOUT": 0.15,          # Spatial Dropout2d in residual blocks
-    "USE_AMP": False,         # CPU safe
+    "USE_AMP": True,          # Enable FP16 Mixed Precision on RTX 4060 GPU
     
     # Loss Weights
     "LAMBDA_PLUME": 1.0,      # Peak-weighted Charbonnier loss weight
@@ -84,11 +88,17 @@ CONFIG = {
     "LAMBDA_SSIM": 0.2,       # Structural similarity loss weight
     "PLUME_GAMMA": 3.0,       # Severity penalty exponent for missing high peaks
     
-    # Physical Atmospheric Column Density Scales (mol/m^2) based on real training set std
+    # Physical Atmospheric Column Density Scales (mol/m^2) based on clean mask-valid training set stats
     "SCALES": {
-        "NO2_SCALE": 1.1782e-5,  # Real S5P std from training set
-        "CO_SCALE":  1.1198e-2,  # Real S5P std from training set
-        "SO2_SCALE": 1.0599e-4,  # Real S5P std from training set
+        "NO2_SCALE": 1.1782e-5,  # Real S5P std from training set (unchanged)
+        "CO_SCALE":  1.1198e-2,  # Real S5P std from training set (unchanged)
+        "SO2_SCALE": 1.2324e-4,  # Clean mask-valid S5P std from training set (recomputed in Step A)
+    },
+    # Per-Channel Loss Weights inside PlumePreservingCompoundLoss (proportional to valid pixel count)
+    "CHANNEL_WEIGHTS": {
+        "NO2": 1.0,              # 86.24% valid pixels (unchanged)
+        "CO":  1.0,              # 90.71% valid pixels (unchanged)
+        "SO2": 1.822,            # 48.57% valid pixels (88.48% avg valid / 48.57% = 1.822x multiplier)
     },
     
     # Save Paths
@@ -98,14 +108,38 @@ CONFIG = {
 }
 
 
+def invert_so2_prediction(tensor_or_array, so2_scale=None):
+    """
+    Inverts SO2 channel from log1p normalized space back to linear physical column density (mol/m^2)
+    via expm1(z) * SO2_SCALE. NO2 (ch 0) and CO (ch 1) remain untouched.
+    Supports both PyTorch Tensors and NumPy arrays with shape (B, 3, H, W) or (3, H, W).
+    """
+    if so2_scale is None:
+        so2_scale = CONFIG["SCALES"]["SO2_SCALE"]
+    if isinstance(tensor_or_array, torch.Tensor):
+        out = tensor_or_array.clone()
+        if out.dim() == 4:
+            out[:, 2] = torch.expm1(torch.clamp(out[:, 2], min=0.0)) * so2_scale
+        elif out.dim() == 3:
+            out[2] = torch.expm1(torch.clamp(out[2], min=0.0)) * so2_scale
+        return out
+    else:
+        out = np.copy(tensor_or_array)
+        if out.ndim == 4:
+            out[:, 2] = np.expm1(np.clip(out[:, 2], 0.0, None)) * so2_scale
+        elif out.ndim == 3:
+            out[2] = np.expm1(np.clip(out[2], 0.0, None)) * so2_scale
+        return out
+
+
 # ==============================================================================
-# 2. Plume-Preserving Mathematical Loss Functions
+# 2. Plume-Preserving Mathematical Loss Functions (with Per-Channel Weighting)
 # ==============================================================================
 
 class SpatialGradientLoss(nn.Module):
     """
     Computes L1 difference between spatial gradients of predicted and true fields,
-    weighted exclusively over genuine unmasked physical retrieval pixels.
+    weighted exclusively over genuine unmasked physical retrieval pixels with per-channel weights.
     """
     def __init__(self):
         super().__init__()
@@ -114,7 +148,7 @@ class SpatialGradientLoss(nn.Module):
         self.register_buffer("kernel_x", sobel_x)
         self.register_buffer("kernel_y", sobel_y)
 
-    def forward(self, pred, target, mask=None):
+    def forward(self, pred, target, mask=None, channel_weights=None):
         # pred, target: (B, C, H, W)
         b, c, h, w = pred.shape
         kx = self.kernel_x.repeat(c, 1, 1, 1)
@@ -125,22 +159,28 @@ class SpatialGradientLoss(nn.Module):
         grad_target_x = F.conv2d(target, kx, padding=1, groups=c)
         grad_target_y = F.conv2d(target, ky, padding=1, groups=c)
 
-        diff_x = torch.abs(grad_pred_x - grad_target_x)
-        diff_y = torch.abs(grad_pred_y - grad_target_y)
+        diff = torch.abs(grad_pred_x - grad_target_x) + torch.abs(grad_pred_y - grad_target_y)
 
         if mask is not None:
-            m_sum = mask.sum() + 1e-8
-            loss_x = (diff_x * mask).sum() / m_sum
-            loss_y = (diff_y * mask).sum() / m_sum
+            if channel_weights is not None:
+                c_losses = []
+                for ch in range(c):
+                    m_ch = mask[:, ch:ch+1]
+                    w_ch = channel_weights[0, ch, 0, 0]
+                    l_ch = (diff[:, ch:ch+1] * m_ch).sum() / (m_ch.sum() + 1e-8)
+                    c_losses.append(l_ch * w_ch)
+                return sum(c_losses) / channel_weights.sum()
+            else:
+                m_sum = mask.sum() + 1e-8
+                return (diff * mask).sum() / m_sum
         else:
-            loss_x = diff_x.mean()
-            loss_y = diff_y.mean()
-        return loss_x + loss_y
+            return diff.mean()
 
 
 class DifferentiableSSIMLoss(nn.Module):
     """
-    Differentiable Structural Similarity (SSIM) Loss computed strictly on valid observation regions.
+    Differentiable Structural Similarity (SSIM) Loss computed strictly on valid observation regions
+    with per-channel weights.
     """
     def __init__(self, window_size=7):
         super().__init__()
@@ -153,7 +193,7 @@ class DifferentiableSSIMLoss(nn.Module):
         kernel = gaussian.mm(gaussian.t()).unsqueeze(0).unsqueeze(0)
         self.register_buffer("kernel", kernel)
 
-    def forward(self, pred, target, mask=None):
+    def forward(self, pred, target, mask=None, channel_weights=None):
         b, c, h, w = pred.shape
         k = self.kernel.repeat(c, 1, 1, 1)
 
@@ -179,21 +219,32 @@ class DifferentiableSSIMLoss(nn.Module):
         if mask is not None:
             w_mask = F.conv2d(mask, k, padding=self.window_size // 2, groups=c)
             valid_w = (w_mask > 0.3).float() * w_mask
-            v_sum = valid_w.sum() + 1e-8
-            return (loss_map * valid_w).sum() / v_sum
+            if channel_weights is not None:
+                c_losses = []
+                for ch in range(c):
+                    vw_ch = valid_w[:, ch:ch+1]
+                    w_ch = channel_weights[0, ch, 0, 0]
+                    l_ch = (loss_map[:, ch:ch+1] * vw_ch).sum() / (vw_ch.sum() + 1e-8)
+                    c_losses.append(l_ch * w_ch)
+                return sum(c_losses) / channel_weights.sum()
+            else:
+                v_sum = valid_w.sum() + 1e-8
+                return (loss_map * valid_w).sum() / v_sum
         return loss_map.mean()
 
 
 class PlumePreservingCompoundLoss(nn.Module):
     """
-    Solves both the scale disparity (CO vs NO2 vs SO2) and the blur collapse:
-    1. Normalizes each channel to [0, 1] scale dynamically so all pollutants contribute equally.
-    2. Weights loss on top-tier concentration peaks (factories/plumes) by (1 + gamma * target^2).
-    3. Adds Sobel edge loss to stop fuzzy borders.
-    4. Adds SSIM loss to preserve multi-scale structure.
-    5. Mask-weighted computation: completely excludes nodata/cloud-screened zeros from penalizing the model.
+    Phase 2 Plume-Preserving Compound Loss:
+    1. Normalizes NO2 and CO linearly by physical scales; SO2 is already in log1p unit space.
+    2. Weights loss on top-tier concentration peaks by (1 + gamma * target^2).
+    3. Sobel edge loss + SSIM loss on unmasked pixels.
+    4. S5P Per-Channel Loss Weighting:
+       - NO2: 1.0 (86.24% valid)
+       - CO:  1.0 (90.71% valid)
+       - SO2: 1.822 (48.57% valid, scaled inversely to its sparsity so gradients aren't underweighted)
     """
-    def __init__(self, scales, gamma=5.0, lambda_plume=1.0, lambda_grad=0.5, lambda_ssim=0.3):
+    def __init__(self, scales, gamma=5.0, lambda_plume=1.0, lambda_grad=0.5, lambda_ssim=0.3, channel_weights=None):
         super().__init__()
         self.gamma = gamma
         self.lambda_plume = lambda_plume
@@ -201,14 +252,20 @@ class PlumePreservingCompoundLoss(nn.Module):
         self.lambda_ssim = lambda_ssim
         
         # Scale vectors for [NO2, CO, SO2]
-        scale_tensor = torch.tensor([scales["NO2_SCALE"], scales["CO_SCALE"], scales["SO2_SCALE"]]).view(1, 3, 1, 1)
+        # NO2 and CO are scaled by NO2_SCALE and CO_SCALE; SO2 is already in log1p normalized unit space
+        scale_tensor = torch.tensor([scales["NO2_SCALE"], scales["CO_SCALE"], 1.0]).view(1, 3, 1, 1)
         self.register_buffer("scale_tensor", scale_tensor)
+
+        if channel_weights is None:
+            channel_weights = [1.0, 1.0, 1.822]
+        c_weights = torch.tensor(channel_weights, dtype=torch.float32).view(1, 3, 1, 1)
+        self.register_buffer("channel_weights", c_weights)
         
         self.grad_loss = SpatialGradientLoss()
         self.ssim_loss = DifferentiableSSIMLoss()
 
     def forward(self, pred, target, mask=None):
-        # Normalize to unit variance / ~[0, 1] space using physical scale constants
+        # Normalize to unit variance / [0, 1] space: NO2 & CO via scales, SO2 is already log1p-normalized
         p_norm = pred / (self.scale_tensor + 1e-8)
         t_norm = target / (self.scale_tensor + 1e-8)
 
@@ -218,16 +275,21 @@ class PlumePreservingCompoundLoss(nn.Module):
         weighted_diff = plume_weight * charbonnier_diff
 
         if mask is not None:
-            m_sum = mask.sum() + 1e-8
-            l_plume = (weighted_diff * mask).sum() / m_sum
+            c_losses = []
+            for ch in range(3):
+                m_ch = mask[:, ch:ch+1]
+                w_ch = self.channel_weights[0, ch, 0, 0]
+                l_ch = (weighted_diff[:, ch:ch+1] * m_ch).sum() / (m_ch.sum() + 1e-8)
+                c_losses.append(l_ch * w_ch)
+            l_plume = sum(c_losses) / self.channel_weights.sum()
         else:
             l_plume = weighted_diff.mean()
 
         # 2. Spatial Gradient / Edge Loss
-        l_grad = self.grad_loss(p_norm, t_norm, mask=mask)
+        l_grad = self.grad_loss(p_norm, t_norm, mask=mask, channel_weights=self.channel_weights)
 
         # 3. Structural Similarity Loss
-        l_ssim = self.ssim_loss(p_norm, t_norm, mask=mask)
+        l_ssim = self.ssim_loss(p_norm, t_norm, mask=mask, channel_weights=self.channel_weights)
 
         total_loss = (
             self.lambda_plume * l_plume +
@@ -315,11 +377,11 @@ class STResUNet(nn.Module):
         total_in = in_channels_s5p + in_channels_s2
 
         # Ingestion normalization statistics computed strictly from real 2019-2022 training set:
-        # NO2: mean=1.8459e-5, std=1.1782e-5
-        # CO:  mean=3.0457e-2, std=1.1198e-2
-        # SO2: mean=7.5469e-5, std=1.0599e-4
-        self.register_buffer("s5p_mean", torch.tensor([1.8459e-5, 3.0457e-2, 7.5469e-5]).view(1, 1, 3, 1, 1))
-        self.register_buffer("s5p_std",  torch.tensor([1.1782e-5, 1.1198e-2, 1.0599e-4]).view(1, 1, 3, 1, 1))
+        # NO2: mean=1.8459e-5, std=1.1782e-5 (linear physical)
+        # CO:  mean=3.0457e-2, std=1.1198e-2 (linear physical)
+        # SO2: mean=0.7469,    std=0.4500     (in log1p unit space from clean training pixels)
+        self.register_buffer("s5p_mean", torch.tensor([1.8459e-5, 3.0457e-2, 0.7469]).view(1, 1, 3, 1, 1))
+        self.register_buffer("s5p_std",  torch.tensor([1.1782e-5, 1.1198e-2, 0.4500]).view(1, 1, 3, 1, 1))
         self.register_buffer("s2_mean",  torch.tensor(0.0931))
         self.register_buffer("s2_std",   torch.tensor(0.1283))
 
@@ -624,6 +686,11 @@ class AtmosphericDataset(Dataset):
                     s5p_target = torch.rot90(s5p_target, k=rot_k, dims=[-2, -1])
                     target_mask = torch.rot90(target_mask, k=rot_k, dims=[-2, -1])
 
+            # Phase 2: Apply log1p on SO2 channel (index 2) in model input and target; NO2 and CO remain linear
+            so2_scale = CONFIG["SCALES"]["SO2_SCALE"]
+            s5p_in[:, 2] = torch.log1p(torch.clamp(s5p_in[:, 2], min=0.0) / so2_scale)
+            s5p_target[2] = torch.log1p(torch.clamp(s5p_target[2], min=0.0) / so2_scale)
+
             return s5p_in, s2_in, s5p_target, target_mask
         else:
             sample_seed = idx + (5000 if self.split != "train" else 0)
@@ -638,6 +705,12 @@ class AtmosphericDataset(Dataset):
             s2_in = s2_tensor[:self.t_in]
             s5p_target = s5p_tensor[self.t_in]
             target_mask = torch.ones_like(s5p_target)
+
+            # Phase 2: Apply log1p on SO2 channel
+            so2_scale = CONFIG["SCALES"]["SO2_SCALE"]
+            s5p_in[:, 2] = torch.log1p(torch.clamp(s5p_in[:, 2], min=0.0) / so2_scale)
+            s5p_target[2] = torch.log1p(torch.clamp(s5p_target[2], min=0.0) / so2_scale)
+
             return s5p_in, s2_in, s5p_target, target_mask
 
 
@@ -706,8 +779,137 @@ def plot_forecast_results(true_np, pred_np, save_path="forecast_evaluation_sharp
 
 
 # ==============================================================================
-# 6. Fast Training & Validation Engine
+# 6. Fast Training & Validation Engine & Step A Diagnostics
 # ==============================================================================
+
+def compute_dataset_diagnostics():
+    """
+    Step A Fast Diagnostics:
+    1. Computes actual masked-pixel fraction per pollutant channel (NO2, CO, SO2) separately.
+    2. Computes mean valid-pixel fraction per patch for <=2022 CV folds vs 2023-2024 holdout set.
+    3. Computes clean mask-valid distribution statistics for SO2.
+    """
+    print("\n" + "=" * 80)
+    print("🔬 RUNNING STEP A DATASET & MASKING DIAGNOSTICS")
+    print("=" * 80)
+
+    real_data_dir = CONFIG.get("DATA_DIR", os.path.join(parent_dir, "data", "processed"))
+    ds = AtmosphericDataset(data_dir=real_data_dir, split="historical", t_in=CONFIG["T_IN"], h=CONFIG["IMG_H"], w=CONFIG["IMG_W"])
+
+    cached = AtmosphericDataset._cached_data
+    df = cached["df"]
+    s5p = cached["s5p"].numpy()          # (N, 3, 256, 256)
+    masks = cached["s5p_mask"].numpy()   # (N, 3, 256, 256)
+    years = df["year"].values
+
+    pollutants = ["NO2", "CO", "SO2"]
+
+    print("\n" + "-" * 80)
+    print("1. ACTUAL MASKED-PIXEL FRACTION PER POLLUTANT CHANNEL (FULL DATASET, N=118 SCENES)")
+    print("-" * 80)
+    for c_idx, name in enumerate(pollutants):
+        total_px = masks[:, c_idx].size
+        valid_px = int(np.sum(masks[:, c_idx] > 0.5))
+        masked_px = total_px - valid_px
+        valid_pct = (valid_px / total_px) * 100.0
+        masked_pct = (masked_px / total_px) * 100.0
+        print(f"  [{name:3s}] Valid: {valid_px:,} ({valid_pct:.2f}%) | Masked/Missing: {masked_px:,} ({masked_pct:.2f}%)")
+
+    # Historical (<=2022) vs Holdout (2023-2024)
+    hist_scene_mask = years <= 2022
+    hold_scene_mask = years >= 2023
+    print(f"\nBreakdown across scenes: {int(np.sum(hist_scene_mask))} Historical (<=2022) vs {int(np.sum(hold_scene_mask))} Holdout (2023-2024):")
+    for c_idx, name in enumerate(pollutants):
+        hist_v = float(np.mean(masks[hist_scene_mask, c_idx] > 0.5) * 100.0)
+        hold_v = float(np.mean(masks[hold_scene_mask, c_idx] > 0.5) * 100.0)
+        print(f"  [{name:3s}] Historical (<=2022): Valid={hist_v:.2f}% (Masked={100-hist_v:.2f}%) | Holdout (2023-2024): Valid={hold_v:.2f}% (Masked={100-hold_v:.2f}%)")
+
+    print("\n" + "-" * 80)
+    print("2. MEAN VALID-PIXEL FRACTION PER PATCH (<=2022 CV FOLDS VS 2023-2024 HOLDOUT)")
+    print("-" * 80)
+
+    train_val_seqs = ds.train_val_seqs # 28 sequences
+    test_seqs = ds.test_seqs           # 86 sequences
+    tile_offsets = ds.tile_offsets     # 9 tiles
+
+    def analyze_patch_validity(seqs, label):
+        patch_valid_dict = {p: [] for p in pollutants}
+        patch_valid_all = []
+        for (hist_idx, target_idx, tdate, tyear) in seqs:
+            for (ty, tx) in tile_offsets:
+                p_mask = masks[target_idx, :, ty:ty+CONFIG["IMG_H"], tx:tx+CONFIG["IMG_W"]] # (3, 128, 128)
+                for c_idx, p in enumerate(pollutants):
+                    patch_valid_dict[p].append(np.mean(p_mask[c_idx] > 0.5))
+                patch_valid_all.append(np.mean(p_mask > 0.5))
+        
+        n_patches = len(seqs) * len(tile_offsets)
+        print(f"\n--- {label} ({len(seqs)} seqs x {len(tile_offsets)} tiles = {n_patches} patches) ---")
+        print(f"Overall Valid Pixels: Mean = {np.mean(patch_valid_all)*100:.2f}% (Std: {np.std(patch_valid_all)*100:.2f}%)")
+        for p in pollutants:
+            arr = np.array(patch_valid_dict[p]) * 100.0
+            print(f"  {p:4s} Valid Fraction per Patch: Mean = {arr.mean():.2f}% (Std: {arr.std():.2f}%) | Mean Masked = {100.0 - arr.mean():.2f}%")
+        return patch_valid_dict
+
+    hist_patches = analyze_patch_validity(train_val_seqs, "<=2022 Historical Sequences (CV Pool)")
+    hold_patches = analyze_patch_validity(test_seqs, "2023-2024 Holdout Test Sequences")
+
+    # 5-Fold Cross Validation breakdown
+    fold_indices = np.array_split(np.arange(len(train_val_seqs)), 5)
+    print("\n--- Historical 5-Fold Cross Validation Folds (<=2022) Breakdown ---")
+    for f_idx, s_idx in enumerate(fold_indices):
+        fold_seqs = [train_val_seqs[i] for i in s_idx]
+        co_vals = []
+        overall_vals = []
+        for (hist_i, target_i, tdate, tyear) in fold_seqs:
+            for (ty, tx) in tile_offsets:
+                pm = masks[target_i, :, ty:ty+CONFIG["IMG_H"], tx:tx+CONFIG["IMG_W"]]
+                co_vals.append(np.mean(pm[1] > 0.5))
+                overall_vals.append(np.mean(pm > 0.5))
+        co_m = float(np.mean(co_vals) * 100.0)
+        ov_m = float(np.mean(overall_vals) * 100.0)
+        print(f"  Fold {f_idx + 1} (n={len(fold_seqs)*9} patches): Overall Valid = {ov_m:.2f}% | CO Valid = {co_m:.2f}% (Masked: {100-co_m:.2f}%)")
+
+    print("\n" + "-" * 80)
+    print("3. CLEAN MASK-VALID DISTRIBUTION STATS FOR SO2 (TRAINING SET ONLY)")
+    print("-" * 80)
+    num_val = max(2, int(len(train_val_seqs) * 0.2))
+    num_train = len(train_val_seqs) - num_val
+    train_seqs = train_val_seqs[:num_train]
+    train_target_indices = [seq[1] for seq in train_seqs]
+
+    so2_valid_pixels = []
+    for t_idx in train_target_indices:
+        so2_data = s5p[t_idx, 2]
+        so2_m = masks[t_idx, 2] > 0.5
+        valid_px = so2_data[so2_m]
+        if len(valid_px) > 0:
+            so2_valid_pixels.append(valid_px)
+    so2_valid_pixels = np.concatenate(so2_valid_pixels)
+
+    print(f"Training Set SO2 Valid Pixels (N={len(so2_valid_pixels):,} valid pixels across {len(train_seqs)} training targets):")
+    print(f"  Min:     {so2_valid_pixels.min():.6e}")
+    print(f"  Max:     {so2_valid_pixels.max():.6e}")
+    print(f"  Mean:    {so2_valid_pixels.mean():.6e}")
+    print(f"  Median:  {np.median(so2_valid_pixels):.6e}")
+    print(f"  Std:     {so2_valid_pixels.std():.6e}")
+    for pct in [1, 5, 25, 50, 75, 90, 95, 99, 99.5]:
+        print(f"  {pct:4.1f}th Percentile: {np.percentile(so2_valid_pixels, pct):.6e}")
+
+    # Valid pixel count ratio for loss weighting (Step B.3)
+    no2_valid_cnt = np.sum(masks[:, 0] > 0.5)
+    co_valid_cnt  = np.sum(masks[:, 1] > 0.5)
+    so2_valid_cnt = np.sum(masks[:, 2] > 0.5)
+    avg_no2_co = (no2_valid_cnt + co_valid_cnt) / 2.0
+    so2_weight_ratio = avg_no2_co / (so2_valid_cnt + 1e-8)
+    print(f"\nValid Pixel Ratios: NO2 Valid={np.mean(masks[:, 0]>0.5)*100:.2f}%, CO Valid={np.mean(masks[:, 1]>0.5)*100:.2f}%, SO2 Valid={np.mean(masks[:, 2]>0.5)*100:.2f}%")
+    print(f"Recommended SO2 Loss Weight Multiplier (proportional to sparsity): {so2_weight_ratio:.3f}x")
+    print("=" * 80 + "\n")
+    return {
+        "so2_clean_std": float(so2_valid_pixels.std()),
+        "so2_clean_mean": float(so2_valid_pixels.mean()),
+        "so2_weight_ratio": float(so2_weight_ratio)
+    }
+
 
 def train_model():
     os.makedirs(os.path.dirname(CONFIG["MODEL_SAVE_PATH"]), exist_ok=True)
@@ -751,7 +953,12 @@ def train_model():
         gamma=CONFIG["PLUME_GAMMA"],
         lambda_plume=CONFIG["LAMBDA_PLUME"],
         lambda_grad=CONFIG["LAMBDA_GRAD"],
-        lambda_ssim=CONFIG["LAMBDA_SSIM"]
+        lambda_ssim=CONFIG["LAMBDA_SSIM"],
+        channel_weights=[
+            CONFIG["CHANNEL_WEIGHTS"]["NO2"],
+            CONFIG["CHANNEL_WEIGHTS"]["CO"],
+            CONFIG["CHANNEL_WEIGHTS"]["SO2"]
+        ]
     ).to(DEVICE)
 
     optimizer = torch.optim.AdamW(
@@ -760,13 +967,20 @@ def train_model():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=CONFIG["NUM_EPOCHS"], eta_min=1e-5
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=CONFIG["USE_AMP"])
+    device_type = "cuda" if torch.cuda.is_available() else "cpu"
+    scaler = torch.amp.GradScaler(device_type, enabled=CONFIG["USE_AMP"] and (device_type == "cuda"))
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[Model] ST-ResUNet instantiated with {total_params:,} trainable parameters.")
-    print(f"[Config] Mixed Precision (AMP): {CONFIG['USE_AMP']} | Batch Size: {CONFIG['BATCH_SIZE']}")
+    print(f"[Config] Device: {DEVICE} | Mixed Precision (AMP): {CONFIG['USE_AMP']} | Batch Size: {CONFIG['BATCH_SIZE']}")
     print(f"[Dataset] Real Data Dir: {real_data_dir}")
-    print(f"[Split] Train (<=2022): {len(train_dataset)} seqs | Val (<=2022): {len(val_dataset)} seqs | Test (2023-2024): {len(test_dataset)} seqs")
+    print(f"[Split] Train (<=2022): {len(train_dataset)} patches | Val (<=2022): {len(val_dataset)} patches | Test (2023-2024): {len(test_dataset)} patches")
+    print(f"[Loss Config] Exact S5P Channel Weights inside PlumePreservingCompoundLoss:")
+    print(f"  NO2 Weight: {CONFIG['CHANNEL_WEIGHTS']['NO2']:.3f} (86.24% valid pixels)")
+    print(f"  CO  Weight: {CONFIG['CHANNEL_WEIGHTS']['CO']:.3f} (90.71% valid pixels)")
+    print(f"  SO2 Weight: {CONFIG['CHANNEL_WEIGHTS']['SO2']:.3f} (48.57% valid pixels, 1.822x boost proportional to sparsity)")
+    print(f"[Scale Config] SO2_SCALE updated to clean mask-valid std: {CONFIG['SCALES']['SO2_SCALE']:.4e} mol/m^2")
+    print(f"[Transform] Log1p forward transform on SO2 channel, expm1 inversion for metrics & plots")
     print("-" * 80)
 
     best_val_loss = float("inf")
@@ -786,7 +1000,7 @@ def train_model():
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.cuda.amp.autocast(enabled=CONFIG["USE_AMP"]):
+            with torch.amp.autocast(device_type, enabled=CONFIG["USE_AMP"] and (device_type == "cuda")):
                 pred = model(s5p_in, s2_in)
                 loss, loss_dict = criterion(pred, target, mask=target_mask)
 
@@ -821,15 +1035,17 @@ def train_model():
                 target = target.to(DEVICE, non_blocking=True)
                 target_mask = target_mask.to(DEVICE, non_blocking=True)
 
-                with torch.cuda.amp.autocast(enabled=CONFIG["USE_AMP"]):
+                with torch.amp.autocast(device_type, enabled=CONFIG["USE_AMP"] and (device_type == "cuda")):
                     pred = model(s5p_in, s2_in)
                     loss, _ = criterion(pred, target, mask=target_mask)
 
                 val_loss += loss.item()
-                # Compute masked validation MAE strictly over genuine retrievals
-                diff_no2 = torch.abs(pred[:, 0] - target[:, 0]) * target_mask[:, 0]
-                diff_co  = torch.abs(pred[:, 1] - target[:, 1]) * target_mask[:, 1]
-                diff_so2 = torch.abs(pred[:, 2] - target[:, 2]) * target_mask[:, 2]
+                # Invert SO2 via expm1 to linear physical units for genuine MAE reporting
+                pred_phys = invert_so2_prediction(pred)
+                target_phys = invert_so2_prediction(target)
+                diff_no2 = torch.abs(pred_phys[:, 0] - target_phys[:, 0]) * target_mask[:, 0]
+                diff_co  = torch.abs(pred_phys[:, 1] - target_phys[:, 1]) * target_mask[:, 1]
+                diff_so2 = torch.abs(pred_phys[:, 2] - target_phys[:, 2]) * target_mask[:, 2]
                 val_mae_no2 += (diff_no2.sum() / (target_mask[:, 0].sum() + 1e-8)).item()
                 val_mae_co  += (diff_co.sum() / (target_mask[:, 1].sum() + 1e-8)).item()
                 val_mae_so2 += (diff_so2.sum() / (target_mask[:, 2].sum() + 1e-8)).item()
@@ -867,11 +1083,11 @@ def train_model():
     sample_s2_in  = sample_s2_in.unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(enabled=CONFIG["USE_AMP"]):
+        with torch.amp.autocast(device_type, enabled=CONFIG["USE_AMP"] and (device_type == "cuda")):
             pred = model(sample_s5p_in, sample_s2_in)
 
-    true_sample = sample_target.numpy()
-    pred_sample = pred.squeeze(0).cpu().float().numpy()
+    true_sample = invert_so2_prediction(sample_target).numpy()
+    pred_sample = invert_so2_prediction(pred.squeeze(0)).cpu().float().numpy()
 
     plot_forecast_results(true_sample, pred_sample, save_path=CONFIG["EVAL_PLOT_PATH"])
     print("=" * 80)
@@ -880,4 +1096,7 @@ def train_model():
 
 
 if __name__ == "__main__":
-    train_model()
+    if "--diagnostics" in sys.argv:
+        compute_dataset_diagnostics()
+    else:
+        train_model()

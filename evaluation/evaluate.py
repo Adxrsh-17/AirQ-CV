@@ -24,7 +24,7 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from training.train import STResUNet, AtmosphericDataset, CONFIG, DEVICE
+from training.train import STResUNet, AtmosphericDataset, CONFIG, DEVICE, invert_so2_prediction
 from evaluation.metrics import compute_all_metrics
 
 def run_evaluation(
@@ -98,8 +98,10 @@ def run_evaluation(
             for s5p_in, s2_in, target, target_mask in loader:
                 s5p_in, s2_in = s5p_in.to(device), s2_in.to(device)
                 pred = model(s5p_in, s2_in)
-                fold_preds.append(pred.cpu().numpy())
-                fold_trues.append(target.numpy())
+                pred_phys = invert_so2_prediction(pred)
+                target_phys = invert_so2_prediction(target)
+                fold_preds.append(pred_phys.cpu().numpy())
+                fold_trues.append(target_phys.numpy())
                 fold_masks.append(target_mask.numpy())
 
         f_preds = np.concatenate(fold_preds, axis=0)
@@ -141,7 +143,7 @@ def run_evaluation(
     print(kfold_df.to_string(index=False))
 
     # =========================================================================
-    # PART 2: Evaluation on Strictly Unseen 2023-2024 Holdout Test Set (774 Patches)
+    # PART 2: Holdout Evaluation Across Strictly Unseen Future Sequences (2023-2024)
     # =========================================================================
     print(f"\n" + "-" * 80)
     print("🧪 EVALUATION ON STRICTLY UNSEEN 2023-2024 HOLDOUT TEST SET (774 Patches)")
@@ -160,8 +162,10 @@ def run_evaluation(
         for s5p_in, s2_in, target, target_mask in test_loader:
             s5p_in, s2_in = s5p_in.to(device), s2_in.to(device)
             pred = model(s5p_in, s2_in)
-            all_preds.append(pred.cpu().numpy())
-            all_trues.append(target.numpy())
+            pred_phys = invert_so2_prediction(pred)
+            target_phys = invert_so2_prediction(target)
+            all_preds.append(pred_phys.cpu().numpy())
+            all_trues.append(target_phys.numpy())
             all_masks.append(target_mask.numpy())
 
     preds = np.concatenate(all_preds, axis=0)
