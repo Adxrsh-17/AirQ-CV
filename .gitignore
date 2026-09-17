@@ -1,7 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 
 # Caching and temporary files
 .pytest_cache/
@@ -17,7 +17,7 @@ env/
 venv/
 ENV/
 
-# Large Datasets & Binary Satellite Rasters (>100MB / Multi-GB)
+# Large Datasets & Binary Satellite Rasters / Tensors (>100MB / Multi-GB)
 data/raw/
 data/processed/s2_composites/
 data/processed/s5p_composites/
@@ -25,8 +25,12 @@ data/processed/s5p_composites/
 *.tar.gz
 *.tif
 *.tiff
-training/checkpoints/*_step*.pt
-training/checkpoints/*_frozen.pt
+*.pt
+*.pth
+*.npy
+*.npz
+data/processed/*.pt
+training/checkpoints/*.pt
 
 # OS and Editor files
 .DS_Store

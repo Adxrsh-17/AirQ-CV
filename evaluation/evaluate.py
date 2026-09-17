@@ -83,7 +83,13 @@ def run_evaluation(
     fold_indices = np.array_split(np.arange(n_seqs), n_folds)
     
     pollutants = ["NO2 (mol/m²)", "CO (mol/m²)", "SO2 (mol/m²)"]
-    fold_metrics = {p: {"MAE": [], "RMSE": [], "R2": [], "RelAcc": [], "SSIM": []} for p in pollutants}
+    fold_metrics = {
+        p: {
+            "MAE": [], "RMSE": [], "R2": [], "RelAcc": [], "SSIM": [],
+            "Pearson_r": [], "FSS_3x3": [], "FSS_9x9": [],
+            "CSI": [], "POD": [], "FAR": [], "LogMAE": []
+        } for p in pollutants
+    }
 
     for fold_idx, test_indices in enumerate(fold_indices):
         fold_seqs = [historical_sequences[i] for i in test_indices]
@@ -116,6 +122,14 @@ def run_evaluation(
             fold_metrics[pol]["R2"].append(float(row["R² Score"]))
             fold_metrics[pol]["RelAcc"].append(float(row["Relative Accuracy"].replace("%", "")))
             fold_metrics[pol]["SSIM"].append(float(row["Spatial SSIM"]))
+            fold_metrics[pol]["Pearson_r"].append(float(row["Pearson r"]))
+            fold_metrics[pol]["FSS_3x3"].append(float(row["FSS (3x3)"]))
+            fold_metrics[pol]["FSS_9x9"].append(float(row["FSS (9x9)"]))
+            fold_metrics[pol]["CSI"].append(float(row["CSI (q90)"]))
+            fold_metrics[pol]["POD"].append(float(row["POD (q90)"]))
+            fold_metrics[pol]["FAR"].append(float(row["FAR (q90)"]))
+            if row["Log-space MAE"] != "N/A":
+                fold_metrics[pol]["LogMAE"].append(float(row["Log-space MAE"]))
 
         print(f"  Fold {fold_idx+1}/{n_folds} ({len(fold_seqs)} seqs, {len(fold_ds)} patches) -> "
               f"MAE: NO2={fold_metrics['NO2 (mol/m²)']['MAE'][-1]:.2e}, "
@@ -132,7 +146,14 @@ def run_evaluation(
             "RMSE (Mean ± Std)": f"{np.mean(m['RMSE']):.3e} ± {np.std(m['RMSE']):.2e}",
             "R² Score (Mean ± Std)": f"{np.mean(m['R2']):.3f} ± {np.std(m['R2']):.3f}",
             "Relative Accuracy": f"{np.mean(m['RelAcc']):.2f}% ± {np.std(m['RelAcc']):.2f}%",
-            "Spatial SSIM": f"{np.mean(m['SSIM']):.3f} ± {np.std(m['SSIM']):.3f}"
+            "Spatial SSIM": f"{np.mean(m['SSIM']):.3f} ± {np.std(m['SSIM']):.3f}",
+            "Pearson r (Mean ± Std)": f"{np.mean(m['Pearson_r']):.3f} ± {np.std(m['Pearson_r']):.3f}",
+            "FSS (3x3) (Mean ± Std)": f"{np.mean(m['FSS_3x3']):.3f} ± {np.std(m['FSS_3x3']):.3f}",
+            "FSS (9x9) (Mean ± Std)": f"{np.mean(m['FSS_9x9']):.3f} ± {np.std(m['FSS_9x9']):.3f}",
+            "CSI (q90) (Mean ± Std)": f"{np.mean(m['CSI']):.3f} ± {np.std(m['CSI']):.3f}",
+            "POD (q90) (Mean ± Std)": f"{np.mean(m['POD']):.3f} ± {np.std(m['POD']):.3f}",
+            "FAR (q90) (Mean ± Std)": f"{np.mean(m['FAR']):.3f} ± {np.std(m['FAR']):.3f}",
+            "Log-space MAE (Mean ± Std)": f"{np.mean(m['LogMAE']):.4f} ± {np.std(m['LogMAE']):.4f}" if len(m['LogMAE']) > 0 else "N/A"
         })
 
     kfold_df = pd.DataFrame(kfold_summary_records)
@@ -179,6 +200,14 @@ def run_evaluation(
     print(f"\n✓ Holdout Test metrics saved to: {out_csv}")
     print("\n--- Physical & Statistical Metrics on Holdout Test Set (2023-2024) ---")
     print(metrics_df.to_string(index=False))
+    print("\n" + "=" * 80)
+    print("⚠️ [Caveat on R² Metric Interpretation]")
+    print("   R² is known to be numerically volatile and sensitive to domain variance on")
+    print("   low-variance, heavily-masked atmospheric targets like SO2 (where true variance")
+    print("   is near zero over vast rural areas). In accordance with atmospheric satellite")
+    print("   verification conventions, Pearson r, Fractions Skill Score (FSS spatial plume")
+    print("   agreement), and CSI/POD/FAR (extreme threshold contingency at q90) provide a")
+    print("   much more robust, physically faithful representation of localized plume forecasting.")
     print("=" * 80)
     return kfold_df, metrics_df
 

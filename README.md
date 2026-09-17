@@ -1,143 +1,155 @@
-# 🛰️ AirQ-CV: Satellite-Driven Multi-Pollutant Forecasting & Downscaling
+# 🛰️ AirQ-CV: Spatiotemporal Multi-Pollutant Forecasting & Downscaling Framework
 
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue?logo=python)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C?logo=pytorch)](https://pytorch.org/)
+[![Sentinel-2](https://img.shields.io/badge/Sentinel--2-12%20Bands-007A3D)](https://sentinels.copernicus.eu/)
+[![Sentinel-5P](https://img.shields.io/badge/Sentinel--5P-NO2%20%7C%20CO%20%7C%20SO2-005A9C)](https://sentinels.copernicus.eu/)
+[![Dataset](https://img.shields.io/badge/Archive-415%20Composites%20(2019--2024)-orange)]()
 
-An end-to-end deep learning framework for **spatiotemporal atmospheric forecasting and high-resolution air quality downscaling** using paired multi-spectral **Sentinel-2** (12 optical bands) and **Sentinel-5P** (Tropospheric $\text{NO}_2$, Column $\text{CO}$, Surface $\text{SO}_2$) satellite observations over Tamil Nadu and the Chennai industrial corridor.
+An advanced deep spatiotemporal neural network architecture for **simultaneous high-resolution downscaling and multi-horizon forecasting** of atmospheric pollutants ($\\mathrm{NO}_2, \\mathrm{CO}, \\mathrm{SO}_2$) over Tamil Nadu, India. 
 
----
-
-## 🌟 Key Architecture & Highlights
-
-- **ST-ResUNet Architecture:** Spatiotemporal U-Net featuring 2D Residual encoder-decoder blocks, **ConvGRU recurrent bottleneck**, and multi-temporal aggregated skip connections.
-- **Multimodal Input-Level Standardization:** Standardizes 12 optical Sentinel-2 bands and 3 Sentinel-5P gas columns based on empirical physical atmospheric statistics.
-- **Plume-Preserving Compound Loss:** Solves the blur-collapse problem using a combination of **Peak-Weighted Charbonnier Loss** ($1 + \gamma \cdot \text{target}^{1.5}$), **Spatial Gradient / Sobel Edge Loss**, and **Differentiable SSIM**.
-- **Multi-Patch Spatial Tiling ($9\times$ Expansion):** Ingests $256 \times 256$ master composites and tiles into 9 overlapping $128 \times 128$ spatial patches (stride 64), multiplying dataset capacity while maintaining low inter-patch redundancy ($r \approx 0.05$).
-- **Dihedral Data Augmentation:** Synchronized random horizontal/vertical flips and $90^\circ$ rotations applied identically to past inputs and future target fields.
-- **Strict Temporal Splitting & K-Fold Validation:** Non-overlapping chronological partition ($\le 2022$ historical vs. $2023\text{–}2024$ holdout test), evaluated with 5-fold sequence-level cross-validation.
+The framework fuses multi-spectral Earth observation imagery from **Copernicus Sentinel-2** (12 optical channels + engineered spectral indices) with atmospheric gas column density rasters from **Copernicus Sentinel-5P TROPOMI** across a 6-year operational archive (2019–2024, 415 paired 5-day composites, 3,699 spatial patches).
 
 ---
 
-## 📊 Quantitative Benchmarks (Phase 4: Architecture Search & Tap Depth Ablation)
+## 🏛️ Architecture: Decoupled-Heads ST-ResUNet
 
-### 1. Model Comparison on Strictly Unseen Future Test Set (2023–2024, 774 Spatial Patches)
+The network features a **frozen SSL4EO-S12 self-supervised Earth-Observation ResNet-18 backbone**, a **Spatiotemporal ConvGRU recurrent bottleneck**, and **three decoupled pollutant-specific decoder heads** branching from the shared decoder trunk:
 
-| Model Configuration | Parameters | $\text{NO}_2$ $R^2$ | $\text{NO}_2$ SSIM | $\text{CO}$ $R^2$ | $\text{CO}$ SSIM | $\text{SO}_2$ $R^2$ | $\text{SO}_2$ SSIM | Mean $R^2$ |
+`mermaid
+graph TD
+    subgraph Ingestion
+        A[Sentinel-5P Past Context: 4x3x128x128] --> C[Spatial Residual Encoder 15->32->64->128]
+        B[Sentinel-2 Optical + Indices: 4x12x128x128] --> D[SSL4EO-S12 Layer2 Tap: 128ch -> 9ch]
+        D --> C
+    end
+
+    subgraph Spatiotemporal Memory
+        C --> E[ConvGRU Bottleneck: 128ch Recurrent Cell]
+    end
+
+    subgraph Shared Decoder Trunk
+        E --> F[TransposeConv Stack + Temporally-Weighted Skips: 128->64->32]
+        F --> G[Shared Dec1 Feature Map: 32ch, 128x128]
+    end
+
+    subgraph Decoupled Pollutant Synthesis Heads
+        G --> H1[NO2 Head: ResBlock2D 32->32 + Conv 32->1]
+        G --> H2[CO Head: Dilated Conv d=2,4 32->32 + Conv 32->1]
+        G --> H3[SO2 Head: ResBlock2D 32->32 + Conv 32->1 (log1p->expm1)]
+        H1 --> OUT1[Forecasted NO2 Field]
+        H2 --> OUT2[Forecasted CO Field]
+        H3 --> OUT3[Forecasted SO2 Field]
+    end
+`
+
+### Specialized Pollutant Heads:
+1. **$\\mathrm{NO}_2$ Head:** Residual convolution block (ResBlock2D(32, 32) $\\to$ Conv2d(32, 1, 1)), targeted at compact point-source emissions (urban highways, power plants).
+2. **$\\mathrm{CO}$ Head:** Dilated convolution block (=2, 4$), expanding the effective receptive field to capture large-scale synoptic advection across hundreds of kilometers.
+3. **$\\mathrm{SO}_2$ Head:** Dedicated residual block operating in $\\mathrm{log1p}$-normalized space, inverted via physical $\\mathrm{expm1}$ scaling to handle extreme heavy-tailed emission spikes.
+
+---
+
+## 📊 Evaluation Benchmarks
+
+### 1. 1-Step Ahead Holdout Test Set (2023–2024, 1,098 Patches)
+
+Evaluated strictly on unseen future dates with zero temporal overlap:
+
+| Target Pollutant | Observed Mean | MAE ($\\mathrm{mol/m}^2$) | RMSE ($\\mathrm{mol/m}^2$) | ^2$ Score | Pearson $ | Spatial SSIM | $\\text{FSS}_{9\\times 9}$ | $\\text{CSI}_{q90}$ | $\\text{POD}_{q90}$ | $\\text{FAR}_{q90}$ | $\\text{Log-MAE}$ |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **$\\mathrm{NO}_2$** | .593\\times 10^{-5}$ | .468\\times 10^{-6}$ | .394\\times 10^{-6}$ | **+0.5085** | **+0.7571** | **0.9575** | **0.9997** | **0.5056** | **0.6558** | 0.3235 | 0.1084 |
+| **$\\mathrm{CO}$** | .846\\times 10^{-2}$ | .247\\times 10^{-3}$ | .013\\times 10^{-3}$ | **+0.5859** | **+0.7850** | **0.9701** | **0.9998** | **0.5283** | **0.6698** | 0.3015 | 0.0818 |
+| **$\\mathrm{SO}_2$** | .316\\times 10^{-4}$ | .138\\times 10^{-4}$ | .042\\times 10^{-4}$ | **+0.0775** | **+0.2974** | **0.8654** | **0.9859** | **0.2599** | **0.4079** | 0.5401 | 0.6974 |
+
+### 2. Multi-Horizon Long-Range Forecasting vs Seasonal Climatology
+
+| Forecast Horizon | Lead Time | Target Pollutant | Model ^2$ | Model Pearson $ | Model $\\text{POD}_{q90}$ | Climatology Baseline ^2$ | Climatology Pearson $ | Climatology $\\text{POD}_{q90}$ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Phase 2 Baseline (Raw Input)** | $1.38\text{M}$ | $+0.2226$ | $0.8427$ | $+0.3856$ | $0.5517$ | $-0.0029$ | $0.5593$ | $+0.2018$ |
-| **Phase 3 Champion: Frozen `layer2` (8x Tap)** 🏆 | $1.39\text{M}$ | **$+0.2794$** | $0.8468$ | **$+0.4480$** | **$0.5671$** | **$+0.0172$** | $0.5606$ | **$+0.2482$** |
-| **Phase 4 Step A: Attention Gates (`layer2`)** | $1.39\text{M}$ | $+0.2317$ | $0.8423$ | $+0.3101$ | $0.5469$ | $+0.0056$ | $0.5697$ | $+0.1825$ |
-| **Phase 4 Step B: `layer1` Tap (4x Tap, No AG)** | $1.38\text{M}$ | $+0.2909$ | **$0.8502$** | $+0.1733$ | $0.5643$ | $+0.0295$ | **$0.5736$** | $+0.1646$ |
+| **Horizon 1** | **5 Days** | $\\mathrm{NO}_2$ | **+0.5085** | **+0.7571** | **0.6558** | +0.4705 | +0.7303 | 0.6120 |
+| | | $\\mathrm{CO}$ | **+0.5859** | **+0.7850** | **0.6698** | +0.6374 | +0.8035 | 0.7023 |
+| | | $\\mathrm{SO}_2$ | **+0.0775** | **+0.2974** | **0.4079** | -0.1102 | +0.0732 | 0.2201 |
+| **Horizon 30** | **150 Days** | $\\mathrm{NO}_2$ | -0.0163 | +0.4001 | 0.2796 | +0.4705 | +0.7303 | 0.6120 |
+| | | $\\mathrm{CO}$ | +0.2255 | **+0.6802** | **0.5397** | +0.6374 | +0.8035 | 0.7023 |
+| | | $\\mathrm{SO}_2$ | -0.0381 | +0.0386 | 0.2014 | -0.1102 | +0.0732 | 0.2201 |
+| **Horizon 60** | **300 Days** | $\\mathrm{NO}_2$ | -0.0094 | +0.4093 | 0.2635 | +0.4705 | +0.7303 | 0.6120 |
+| | | $\\mathrm{CO}$ | +0.1345 | **+0.5445** | **0.4485** | +0.6374 | +0.8035 | 0.7023 |
+| | | $\\mathrm{SO}_2$ | -0.0396 | +0.0374 | 0.1772 | -0.1102 | +0.0732 | 0.2201 |
 
-> [!TIP]
-> **Key Architectural Insights:**
-> 1. **Additive Attention Gates (Step A):** Adding Oktay et al. attention gates to U-Net skip connections suppresses diffuse plume boundaries in the low-sample regime (23 sequences), lowering holdout $R^2$ across all three pollutants. Direct concatenation skip connections remain superior.
-> 2. **Encoder Tap Depth Trade-off (Step B):** Tapping `layer1` ($4\times$ downsampling, 64 channels) delivers higher spatial sharpness for localized point-source plumes ($\text{NO}_2$ $R^2$ reaches $+0.2909$ / SSIM $0.8502$; $\text{SO}_2$ reaches $+0.0295$ / SSIM $0.5736$). However, it severely degrades long-range regional transport tracking for $\text{CO}$ ($R^2$ plunges from $+0.4480$ to $+0.1733$) due to smaller receptive field.
-> 3. **The Champion Architecture:** The **Frozen SSL4EO-S12 `layer2` tap ($8\times$ downsampling) with standard concatenation skip connections** achieves the optimal multi-pollutant balance with the highest overall average $R^2$ ($+0.2482$).
+---
 
-### 2. 5-Fold Cross-Validation Across Historical Sequences (≤ 2022)
-*Grouped by temporal sequence (54 patches/fold, 252 total patches) strictly excluding nodata mask dropouts:*
+## 📈 Visualizations & Diagnostics
 
-| Target Pollutant | MAE ($\text{Mean} \pm \text{Std}$) | RMSE ($\text{Mean} \pm \text{Std}$) | $R^2$ Score ($\text{Mean} \pm \text{Std}$) | Relative Accuracy ($\pm 25\%$) | Spatial SSIM |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **$\text{NO}_2$ (Nitrogen Dioxide)** | $(6.452 \pm 0.445) \times 10^{-6}\text{ mol/m}^2$ | $(8.736 \pm 0.528) \times 10^{-6}$ | **$+0.221 \pm 0.086$** | $71.04\% \pm 3.10\%$ | $0.812 \pm 0.054$ |
-| **$\text{CO}$ (Carbon Monoxide)** | $(3.828 \pm 0.733) \times 10^{-3}\text{ mol/m}^2$ | $(4.870 \pm 0.717) \times 10^{-3}$ | **$-0.372 \pm 0.250$** | $88.09\% \pm 2.02\%$ | $0.442 \pm 0.048$ |
-| **$\text{SO}_2$ (Sulfur Dioxide)** | **$(9.432 \pm 0.141) \times 10^{-5}\text{ mol/m}^2$** | **$(1.260 \pm 0.054) \times 10^{-4}$** | **$-0.023 \pm 0.022$** | **$33.57\% \pm 4.37\%$** | **$0.434 \pm 0.114$** |
+### Multi-Horizon Degradation Curves
+![Multi-Horizon Comparison](plots/analysis/multi_horizon_comparison.png)
 
-### 3. Physical & Statistical Metrics on Strictly Unseen Future Test Set (2023–2024, 774 Patches)
+### Model Predictions & Spatial Super-Resolution
+![Multi Sample Forecasts](plots/forecast/multi_sample_forecasts.png)
 
-| Target Pollutant | Mean True Observation | Mean Absolute Error ($\text{MAE}$) | Root Mean Squared Error ($\text{RMSE}$) | $R^2$ Score | Relative Accuracy ($\pm 25\%$) | Spatial SSIM |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **$\text{NO}_2$ (Nitrogen Dioxide)** | $2.13 \times 10^{-5}\text{ mol/m}^2$ | **$6.99 \times 10^{-6}\text{ mol/m}^2$** | **$9.40 \times 10^{-6}\text{ mol/m}^2$** | **$+0.2794$** | **$67.20\%$** | **$0.8468$** |
-| **$\text{CO}$ (Carbon Monoxide)** | $3.31 \times 10^{-2}\text{ mol/m}^2$ | **$3.82 \times 10^{-3}\text{ mol/m}^2$** | **$5.01 \times 10^{-3}\text{ mol/m}^2$** | **$+0.4480$** | **$88.44\%$** | **$0.5671$** |
-| **$\text{SO}_2$ (Sulfur Dioxide)** | $1.43 \times 10^{-4}\text{ mol/m}^2$ | **$9.89 \times 10^{-5}\text{ mol/m}^2$** | **$1.39 \times 10^{-4}\text{ mol/m}^2$** | **$+0.0172$** | **$30.83\%$** | **$0.5606$** |
+### Plume Cross-Section Transects
+![Plume Transects](plots/analysis/plume_transect_profiles.png)
+
+### Scatter Parity & Error Distributions
+![Parity Plots](plots/analysis/parity_and_correlation_plots.png)
 
 ---
 
 ## 📁 Repository Structure
 
-```text
+`
 AirQ-CV/
 ├── data/
-│   ├── processed/
-│   │   ├── dataset.py                  # PyTorch Multimodal Dataset with spatial tiling
-│   │   ├── dataset_manifest.csv        # Metadata and temporal pairing manifest
-│   │   └── stream_utils.py             # Memory-mapped streaming utilities
-│   └── raw/                            # Raw data folder (ignored by git)
-│
-├── training/
-│   ├── checkpoints/
-│   │   └── best_sharp_forecast_model.pt # Trained ST-ResUNet weights (5.3 MB)
-│   ├── configs/
-│   │   └── train_config.yaml           # Training parameters and loss weights
-│   ├── logs/
-│   │   └── train.log                   # Full 35-epoch training and validation loss log
-│   └── train.py                        # Training pipeline with compound loss
-│
+│   └── processed/
+│       └── dataset_manifest.csv         # Complete metadata manifest (415 composites)
 ├── evaluation/
-│   ├── evaluate.py                     # Evaluation runner (5-Fold CV + holdout benchmark)
-│   ├── metrics.py                      # Physical & spatial metrics (MAE, RMSE, R2, SSIM)
-│   └── results/
-│       ├── evaluation_metrics.csv      # Holdout test metrics
-│       └── kfold_cross_validation_metrics.csv # 5-Fold cross-validation metrics
-│
+│   ├── evaluate.py                      # Multi-metric evaluation engine
+│   ├── metrics.py                       # Comprehensive spatial & meteorological metrics
+│   └── results/                         # Evaluation CSV outputs (H=1, H=30, H=60)
 ├── plots/
-│   ├── analysis/
-│   │   ├── parity_and_correlation_plots.png # Hexbin scatters & error distributions
-│   │   └── plume_transect_profiles.png      # 1D plume cross-section transects
-│   ├── environment/
-│   │   └── environmental_hazard_index.png   # Multi-pollutant composite hazard map
-│   ├── forecast/
-│   │   ├── forecast_evaluation_sharp.png    # 3x3 Ground truth vs prediction comparison
-│   │   └── multi_sample_forecasts.png       # Diverse multi-step forecasts
-│   ├── training_curve_comparison.png        # Training & validation loss curves
-│   └── generate_plots.py                    # Script to regenerate all diagnostic plots
-│
-├── docs/
-│   ├── context.md                      # Detailed project context & scientific background
-│   ├── dataset-details.md              # Band specifications & physical units
-│   └── dataset_audit_report.md         # Full 8-question dataset audit report
-│
-├── utils/
-│   ├── __init__.py
-│   └── helper_functions.py             # Utilities for formatting and seeding
-│
-├── .gitignore                          # Excludes large raw GeoTIFF rasters (>4GB)
-└── README.md
-```
+│   ├── analysis/                        # Parity, plume transects, multi-horizon plots
+│   ├── environment/                     # Hazard index maps
+│   └── forecast/                        # High-resolution forecast figures
+├── scratch/
+│   ├── train_multi_horizon.py           # Multi-horizon training pipeline
+│   ├── eval_climatology.py              # Seasonal climatology benchmark evaluator
+│   └── generate_horizon_plots.py        # Lead-time analysis & comparison plotting
+├── training/
+│   └── train.py                         # Decoupled-heads ST-ResUNet model & training loop
+├── MODEL EXPERIMENT & FAILURE ANALYSIS REPORT.md  # Comprehensive research analysis
+├── README.md                            # Project overview & documentation
+└── .gitignore                           # Excludes large binaries & raw rasters (>100MB)
+`
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quickstart
 
 ### 1. Installation
-```bash
-git clone https://github.com/Adxrsh-17/AirQ-CV.git
+`ash
+git clone https://github.com/Adxrsh-17/AirQ-CV.git -b multi-horizon
 cd AirQ-CV
-pip install torch torchvision rasterio numpy pandas matplotlib scipy pyyaml
-```
+pip install -r requirements.txt
+`
 
-### 2. Run Evaluation & 5-Fold Cross-Validation
-```bash
-python evaluation/evaluate.py
-```
-
-### 3. Generate Diagnostic Visualizations
-```bash
-python plots/generate_plots.py
-```
-
-### 4. Train Model
-```bash
+### 2. Training
+`ash
+# Train champion decoupled-heads model (Horizon=1)
 python training/train.py
-```
+
+# Train multi-horizon models (e.g. Horizon=30 / 150 days)
+python scratch/train_multi_horizon.py --horizon 30 --epochs 35
+`
+
+### 3. Evaluation & Benchmarking
+`ash
+# Evaluate Horizon=1 holdout test metrics
+python evaluation/evaluate.py
+
+# Evaluate seasonal-climatology baseline
+python scratch/eval_climatology.py
+`
 
 ---
 
-## 📖 Scientific References & Documentation
-
-For complete technical specifications, see:
-- [`docs/dataset_audit_report.md`](docs/dataset_audit_report.md) — Complete 8-point audit of satellite rasters, distributions, masking, and alignment.
-- [`docs/context.md`](docs/context.md) — Comprehensive atmospheric physics and project motivation.
-- [`docs/dataset-details.md`](docs/dataset-details.md) — Sentinel-2 and Sentinel-5P sensor bands and spatial resolution details.
+## 📜 Citation & License
+This project is licensed under the MIT License.

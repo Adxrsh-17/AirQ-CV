@@ -68,22 +68,22 @@ else:
 CONFIG = {
     # Data Paths & Dimensions
     "DATA_DIR": os.path.join(parent_dir, "data", "processed"),
-    "S2_CHANNELS": 12,        # Sentinel-2 MSI surface reflectance + indices
+    "S2_CHANNELS": 12,        # Sentinel-2: 9 (layer2 projected) + 3 (indices) = 12 channels
     "S5P_CHANNELS": 3,        # 0: NO2, 1: CO, 2: SO2
     "IMG_H": 128,             # Standard spatial grid height
     "IMG_W": 128,             # Standard spatial grid width
     "T_IN": 4,                # Past observation windows (4 * 5 days = 20 days context)
     "T_OUT": 1,               # Forecast lead window (1 * 5 days = 5 days ahead)
     
-    # Pretrained Satellite Image Encoder & Attention Gates (Phase 4)
+    # Pretrained Satellite Image Encoder & Attention Gates (Champion Configuration)
     "USE_PRETRAINED_S2": True,     # Use SSL4EO-S12 pretrained ResNet-18 backbone
     "FREEZE_S2_ENCODER": True,     # Frozen backbone
     "FINETUNE_LAST_BLOCK": False,  # No fine-tuning
-    "USE_ATTENTION_GATES": False,  # Champion Architecture: Attention gates disabled (concatenation baseline wins)
-    "S2_ENCODER_TAP": "layer2",    # Champion Architecture: layer2 tap (8x downsampling, 128 channels)
+    "USE_ATTENTION_GATES": False,  # Attention gates disabled
+    "S2_ENCODER_TAP": "layer2",    # Phase 3 Champion: layer2 (8x downsampling, 128ch -> 9ch)
     
     # Training Hyperparameters
-    "BATCH_SIZE": 8,          # 207 train patches -> 26 batches per epoch
+    "BATCH_SIZE": 8,          # 2,088 train patches -> 261 batches per epoch
     "NUM_EPOCHS": 35,         # Evaluates where val loss reaches global minimum
     "LR": 5e-4,
     "WEIGHT_DECAY": 1e-3,     # 10x higher weight decay to regularize against overfitting
@@ -430,7 +430,18 @@ class STResUNet(nn.Module):
         self.finetune_last_block = finetune_last_block
         self.use_attention_gates = use_attention_gates
         self.s2_encoder_tap = s2_encoder_tap
-        total_in = in_channels_s5p + in_channels_s2
+
+        # Calculate input dimensions dynamically
+        if self.use_pretrained_s2:
+            if self.s2_encoder_tap in ["multiscale", "layer1+layer2"]:
+                s2_feat_dim = 4 + 9 + 3  # 4 (layer1) + 9 (layer2) + 3 (indices) = 16 channels
+            elif self.s2_encoder_tap == "layer1":
+                s2_feat_dim = 9 + 3      # 9 (layer1) + 3 (indices) = 12 channels
+            else:
+                s2_feat_dim = 9 + 3      # 9 (layer2) + 3 (indices) = 12 channels
+            total_in = in_channels_s5p + s2_feat_dim
+        else:
+            total_in = in_channels_s5p + in_channels_s2
 
         # Ingestion normalization statistics computed strictly from real 2019-2022 training set:
         self.register_buffer("s5p_mean", torch.tensor([1.8459e-5, 3.0457e-2, 0.7469]).view(1, 1, 3, 1, 1))
@@ -440,8 +451,12 @@ class STResUNet(nn.Module):
 
         # Pretrained Sentinel-2 Backbone (SSL4EO-S12 ResNet18)
         if self.use_pretrained_s2:
-            out_idx = (1,) if self.s2_encoder_tap == "layer1" else (2,)
-            s2_feat_channels = 64 if self.s2_encoder_tap == "layer1" else 128
+            if self.s2_encoder_tap in ["multiscale", "layer1+layer2"]:
+                out_idx = (1, 2)
+            elif self.s2_encoder_tap == "layer1":
+                out_idx = (1,)
+            else:
+                out_idx = (2,)
 
             self.s2_encoder = timm.create_model('resnet18', in_chans=13, features_only=True, out_indices=out_idx)
             weights_path = os.path.expanduser('~/.cache/torch/hub/checkpoints/resnet18_sentinel2_all_moco-59bfdff9.pth')
@@ -478,11 +493,16 @@ class STResUNet(nn.Module):
             # Spectral band mapping (our 9 physical bands [B2..B12] -> SSL4EO 13 bands)
             self.register_buffer("s2_band_map", torch.tensor([0, 0, 1, 2, 3, 4, 5, 6, 6, 6, 0, 7, 8], dtype=torch.long))
 
-            # Trainable 1x1 conv projecting encoder features down to 9 channels
-            self.s2_proj = nn.Conv2d(s2_feat_channels, 9, kernel_size=1)
+            # Trainable 1x1 conv projecting encoder features: 4ch for layer1 + 9ch for layer2
+            if self.s2_encoder_tap in ["multiscale", "layer1+layer2"]:
+                self.s2_proj_l1 = nn.Conv2d(64, 4, kernel_size=1)
+                self.s2_proj_l2 = nn.Conv2d(128, 9, kernel_size=1)
+            else:
+                s2_feat_channels = 64 if self.s2_encoder_tap == "layer1" else 128
+                self.s2_proj = nn.Conv2d(s2_feat_channels, 9, kernel_size=1)
 
         # Spatial Encoder (Applied per timestep on standardized inputs)
-        self.enc1 = ResBlock2D(total_in, base_channels)             # Scale 1x
+        self.enc1 = ResBlock2D(total_in, base_channels)             # Scale 1x (total_in=19 for multiscale)
         self.down1 = nn.MaxPool2d(2)
         self.enc2 = ResBlock2D(base_channels, base_channels * 2)   # Scale 1/2x
         self.down2 = nn.MaxPool2d(2)
@@ -515,11 +535,24 @@ class STResUNet(nn.Module):
         self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=2, stride=2)
         self.dec1 = ResBlock2D(base_channels * 2, base_channels)
         
-        # Final High-Resolution Plume Synthesis Head (Outputs in standardized space, then scaled to physical units)
-        self.final_conv = nn.Sequential(
-            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
+        # Phase 6 Step 1: Decoupled Pollutant-Specific Decoder Heads
+        # NO2 Head: Standard residual conv block (32 -> 1 channel)
+        self.head_no2 = nn.Sequential(
+            ResBlock2D(base_channels, base_channels),
+            nn.Conv2d(base_channels, 1, kernel_size=1)
+        )
+        # CO Head: Dilated conv block (dilation=2, 4) for expanded receptive field (synoptic advection)
+        self.head_co = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=2, dilation=2),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(base_channels, out_channels, kernel_size=1)
+            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=4, dilation=4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(base_channels, 1, kernel_size=1)
+        )
+        # SO2 Head: Dedicated residual block (32 -> 1 channel) in log1p unit space
+        self.head_so2 = nn.Sequential(
+            ResBlock2D(base_channels, base_channels),
+            nn.Conv2d(base_channels, 1, kernel_size=1)
         )
 
     def forward(self, s5p_seq, s2_seq):
@@ -548,18 +581,29 @@ class STResUNet(nn.Module):
 
             if self.freeze_s2_encoder:
                 with torch.no_grad():
-                    feats = self.s2_encoder(s2_13_norm)[0] # (B*T, C_feat, H_feat, W_feat)
+                    feats = self.s2_encoder(s2_13_norm)
             else:
-                feats = self.s2_encoder(s2_13_norm)[0]
+                feats = self.s2_encoder(s2_13_norm)
 
-            proj_feats = self.s2_proj(feats) # (B*T, 9, H_feat, W_feat)
-            proj_up = F.interpolate(proj_feats, size=(h, w), mode='bilinear', align_corners=False)
-            proj_up = proj_up.view(b, t, 9, h, w)
+            if self.s2_encoder_tap in ["multiscale", "layer1+layer2"]:
+                feat_l1 = feats[0] # (B*T, 64, H/4, W/4)
+                feat_l2 = feats[1] # (B*T, 128, H/8, W/8)
+                proj_l1 = self.s2_proj_l1(feat_l1) # (B*T, 4, H/4, W/4)
+                proj_l2 = self.s2_proj_l2(feat_l2) # (B*T, 9, H/8, W/8)
+                proj_l1_up = F.interpolate(proj_l1, size=(h, w), mode='bilinear', align_corners=False)
+                proj_l2_up = F.interpolate(proj_l2, size=(h, w), mode='bilinear', align_corners=False)
+                proj_up = torch.cat([proj_l1_up, proj_l2_up], dim=1) # (B*T, 13, H, W)
+                proj_up = proj_up.view(b, t, 13, h, w)
+            else:
+                proj_feats = self.s2_proj(feats[0]) # (B*T, 9, H_feat, W_feat)
+                proj_up = F.interpolate(proj_feats, size=(h, w), mode='bilinear', align_corners=False)
+                proj_up = proj_up.view(b, t, 9, h, w)
 
-            # Concatenate 9 projected features with 3 raw full-resolution indices (12 channels)
+            # Concatenate projected features with 3 raw full-resolution indices (16 channels total)
             s2_processed = torch.cat([proj_up, s2_indices], dim=2)
         else:
             s2_processed = (s2_seq - self.s2_mean) / (self.s2_std + 1e-8)
+
         
         skip1_list = []
         skip2_list = []
@@ -601,7 +645,11 @@ class STResUNet(nn.Module):
             d1 = torch.cat([d1, skip1_agg], dim=1)
         d1 = self.dec1(d1)
 
-        norm_pred = self.final_conv(d1) # (B, 3, H, W) in standardized space
+        # Decoupled head inference
+        out_no2 = self.head_no2(d1) # (B, 1, H, W)
+        out_co  = self.head_co(d1)  # (B, 1, H, W)
+        out_so2 = self.head_so2(d1) # (B, 1, H, W)
+        norm_pred = torch.cat([out_no2, out_co, out_so2], dim=1) # (B, 3, H, W) in standardized space
         
         # 6. Invert standardization back to physical concentration units (mol/m^2)
         s5p_mean_2d = self.s5p_mean.squeeze(1) # (1, 3, 1, 1)
@@ -703,9 +751,17 @@ class AtmosphericDataset(Dataset):
             print(f"[{split.upper()} Dataset] Real data not detected; using randomized physical plume simulator.")
 
     def _load_and_cache_real_data(self):
+        cache_pt = os.path.join(self.data_dir, "cached_dataset_256.pt")
+        if os.path.exists(cache_pt):
+            print(f"[Dataset Cache] Loading pre-compiled tensors from {cache_pt} into RAM...")
+            AtmosphericDataset._cached_data = torch.load(cache_pt, map_location="cpu", weights_only=False)
+            print(f"[Dataset Cache] Successfully loaded {len(AtmosphericDataset._cached_data['df'])} cached satellite composites from disk.")
+            return
+
         import rasterio
         import pandas as pd
-        print(f"[Dataset Cache] Ingesting real GeoTIFF composites from {self.data_dir} into RAM (master grid 256x256)...")
+        from concurrent.futures import ThreadPoolExecutor
+        print(f"[Dataset Cache] Ingesting real GeoTIFF composites from {self.data_dir} into RAM...")
         manifest_p = os.path.join(self.data_dir, "dataset_manifest.csv")
         df = pd.read_csv(manifest_p)
         s2_dir = os.path.join(self.data_dir, "s2_composites")
@@ -715,38 +771,38 @@ class AtmosphericDataset(Dataset):
         df = df[df["s2_file"].isin(s2_existing) & df["s5p_file"].isin(s5p_existing)].sort_values("start_date").reset_index(drop=True)
         df["year"] = pd.to_datetime(df["start_date"]).dt.year
 
-        s2_list = []
-        s5p_list = []
-        s5p_mask_list = []
-        master_h, master_w = 256, 256
-
-        for idx, row in df.iterrows():
+        def load_scene(row_tuple):
+            idx, row = row_tuple
             with rasterio.open(os.path.join(s2_dir, row["s2_file"])) as src:
                 raw_s2 = src.read().astype(np.float32)
                 raw_s2 = np.where((raw_s2 <= 0) | np.isnan(raw_s2) | np.isinf(raw_s2), 0.0, raw_s2)
                 t_s2 = torch.from_numpy(raw_s2).clamp(0.0, 1.0)
-                t_s2 = F.interpolate(t_s2.unsqueeze(0), size=(master_h, master_w), mode="bilinear", align_corners=False).squeeze(0)
-                s2_list.append(t_s2)
-
+                t_s2 = F.interpolate(t_s2.unsqueeze(0), size=(256, 256), mode="bilinear", align_corners=False).squeeze(0)
             with rasterio.open(os.path.join(s5p_dir, row["s5p_file"])) as src:
                 raw_s5p = src.read().astype(np.float32)
-                # True retrieval mask: pixel is valid where raw_s5p > 0 and ~nan and ~inf
                 mask_s5p = ((raw_s5p > 0) & (~np.isnan(raw_s5p)) & (~np.isinf(raw_s5p))).astype(np.float32)
                 raw_s5p = np.where((raw_s5p <= 0) | np.isnan(raw_s5p) | np.isinf(raw_s5p), 0.0, raw_s5p)
                 t_s5p = torch.from_numpy(raw_s5p)
                 t_mask = torch.from_numpy(mask_s5p)
-                t_s5p = F.interpolate(t_s5p.unsqueeze(0), size=(master_h, master_w), mode="bilinear", align_corners=False).squeeze(0)
-                t_mask = F.interpolate(t_mask.unsqueeze(0), size=(master_h, master_w), mode="nearest").squeeze(0)
-                s5p_list.append(t_s5p)
-                s5p_mask_list.append(t_mask)
+                t_s5p = F.interpolate(t_s5p.unsqueeze(0), size=(256, 256), mode="bilinear", align_corners=False).squeeze(0)
+                t_mask = F.interpolate(t_mask.unsqueeze(0), size=(256, 256), mode="nearest").squeeze(0)
+            return idx, t_s2, t_s5p, t_mask
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            results = list(executor.map(load_scene, df.iterrows()))
+        results.sort(key=lambda x: x[0])
+        s2_all = torch.stack([r[1] for r in results])
+        s5p_all = torch.stack([r[2] for r in results])
+        mask_all = torch.stack([r[3] for r in results])
 
         AtmosphericDataset._cached_data = {
             "df": df,
-            "s2": torch.stack(s2_list),            # (N, 12, 256, 256)
-            "s5p": torch.stack(s5p_list),          # (N, 3, 256, 256)
-            "s5p_mask": torch.stack(s5p_mask_list) # (N, 3, 256, 256)
+            "s2": s2_all,
+            "s5p": s5p_all,
+            "s5p_mask": mask_all
         }
-        print(f"✓ Successfully cached {len(df)} real satellite composites and retrieval masks at 256x256 in RAM.")
+        torch.save(AtmosphericDataset._cached_data, cache_pt)
+        print(f"[Dataset Cache] Successfully cached {len(df)} real satellite composites to {cache_pt}.")
 
     def __len__(self):
         if self.use_real:
