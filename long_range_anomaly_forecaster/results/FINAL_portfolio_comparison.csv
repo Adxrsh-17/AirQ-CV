@@ -1,0 +1,19 @@
+Horizon,Pollutant,Model,R2_Score,RMSE,Pearson_r,Spatial_SSIM,FSS_9x9,CSI_q90,ROC_AUC,Mass_Error_%,SELECTED,Selection_Rationale
+H=1 (5-Day),NO2,Persistence Baseline (t=0),0.1852,1.037e-05,0.6299,0.6439,0.7187,0.2984,N/A,6.15,False,Baseline
+H=1 (5-Day),NO2,Monthly Climatology Baseline,0.5316,7.862e-06,0.7403,0.7356,0.6427,0.2987,N/A,4.58,False,Baseline
+H=1 (5-Day),NO2,ConvGRU Decoupled ST-ResUNet (DL),0.5152,8.054e-06,0.7273,0.8964,0.6832,0.3614,N/A,2.15,True,Champion: Superior Spatial SSIM (0.8964 vs 0.7293) and Plume CSI (0.3614 vs 0.3190)
+H=1 (5-Day),NO2,LightGBM (Sobel + NDBI),0.5479,7.724e-06,0.7486,0.7293,0.6757,0.319,N/A,3.82,False,Fast tabular surrogate; lacks DL spatial edge structure
+H=1 (5-Day),CO,Persistence Baseline (t=0),-0.6431,0.008702,0.5548,0.596,0.4937,0.1298,N/A,5.76,False,Baseline
+H=1 (5-Day),CO,Monthly Climatology Baseline,0.683,0.003823,0.8344,0.7117,0.3469,0.0941,N/A,1.47,False,Baseline
+H=1 (5-Day),CO,ConvGRU Decoupled ST-ResUNet (DL),0.6213,0.004129,0.7991,0.6075,0.4188,0.1627,N/A,1.12,False,Overfits background synoptic variance compared to Ridge
+H=1 (5-Day),CO,Multi-Scale Regularized Ridge (ML),0.6927,0.003764,0.8352,0.719,0.3653,0.0907,N/A,0.81,True,"Champion: Highest R2 (+0.6927), beats ConvGRU by +0.071 R2 (p<0.001) with Occam's simplicity"
+H=1 (5-Day),SO2,Persistence Baseline (t=0),-0.6987,0.000177,0.1565,0.2272,0.5058,0.0817,N/A,27.17,False,Baseline
+H=1 (5-Day),SO2,Monthly Climatology Baseline,0.0592,0.0001317,0.2845,0.2886,0.5235,0.0841,N/A,0.25,False,Baseline
+H=1 (5-Day),SO2,ConvGRU Decoupled ST-ResUNet (DL),0.0715,0.0001362,0.3146,0.5761,0.2911,0.0871,0.5821,4.32,False,Retained for continuous background field mapping
+H=1 (5-Day),SO2,Two-Stage Hurdle Model (ML),-0.0299,0.0001378,0.275,0.2556,0.531,0.1109,0.6156,2.29,True,"Champion: Superior Operational Hazard Early Warning (AUC=0.6156, Plume Recall=53.49%)"
+H=30 (150-Day),NO2,Monthly Climatology Baseline,0.5316,7.862e-06,0.7403,0.7356,0.6427,0.2987,N/A,4.58,True,Champion: Weather memory is zero at 150d; monthly climatology is true ceiling
+H=30 (150-Day),NO2,Regularized Linear Ridge Regression,0.517,7.983e-06,0.7393,0.7341,0.6281,0.2903,N/A,6.75,False,Collapses to climatology ceiling
+H=30 (150-Day),CO,Monthly Climatology Baseline,0.683,0.003823,0.8344,0.7117,0.3469,0.0941,N/A,1.47,False,Strong baseline
+H=30 (150-Day),CO,Harmonic Regression + ENSO/IOD,0.6872,0.003797,0.835,0.7106,0.3112,0.0861,N/A,1.61,True,Champion: Captures interannual climate modes (ENSO/IOD) with low degrees of freedom
+H=30 (150-Day),SO2,Monthly Climatology Baseline,0.0592,0.0001317,0.2845,0.2886,0.5235,0.0841,N/A,0.25,False,Baseline
+H=30 (150-Day),SO2,Hurdle Categorical Risk Classifier,-0.0168,0.000137,0.2896,0.3041,0.4048,0.0729,0.5959,21.91,True,"Champion: Categorical seasonal risk mapping (Brier=0.2031, AUC=0.5959)"
