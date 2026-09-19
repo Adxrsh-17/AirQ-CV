@@ -1,0 +1,39 @@
+project:
+  name: AirQ-Astra
+  seed: 42
+
+data:
+  raw_root: data/raw
+  s2_dir: data/raw/s2_composites
+  s5p_dir: data/raw/s5p_composites
+  manifest: data/raw/dataset_manifest.csv
+  era5_dir: data/raw/era5
+  processed_root: data/processed
+  strict_sequence_gap_days: 5
+  relaxed_max_gap_days: 15
+
+model:
+  name: faw_msfnet
+  pollutants: [NO2, CO, SO2]
+  s2_backbone: ssl4eo_resnet18
+  freeze_s2: true
+  taps: [layer1, layer2]
+  use_era5: true
+  use_presto: false
+  uncertainty_head: false
+
+training:
+  epochs: 35
+  batch_size: 4
+  lr: 0.0003
+  weight_decay: 0.001
+  amp: true
+  grad_clip: 1.0
+  early_stopping_patience: 8
+
+loss:
+  coarse_huber: 1.0
+  direct_coarse_aux: 0.3
+  edge_aware_tv: 0.01
+  advection: 0.0
+  nonnegative: 0.0

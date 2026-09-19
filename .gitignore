@@ -1,35 +1,60 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# Local datasets and generated results. Source/config files for the new generation
+# pipeline (including provenance/ and data/generation/) remain eligible for Git.
+/data/raw/
+/data/raw_v2/
+/data/interim/
+/data/processed/
+/data/cache/
+/outputs/
 
-# Caching and temporary files
-.pytest_cache/
-.coverage
-htmlcov/
-*.log
-!training/logs/*.log
+# Experiment output trees stay ignored, while the Phase 0C design snapshot is
+# explicitly reviewable. Generated rasters/arrays are also excluded globally
+# by the extension rules below.
+/experiments/*
+!/experiments/E00C_design_20260915T164156Z/
+!/experiments/E00C_design_20260915T164156Z/*.md
+!/experiments/E00C_design_20260915T164156Z/*.yaml
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-
-# Large Datasets & Binary Satellite Rasters (>100MB / Multi-GB)
-data/raw/
-data/processed/s2_composites/
-data/processed/s5p_composites/
+# Large raster, array, archive, and model files anywhere in the tree.
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+*.npy
+*.npz
+*.nc
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.bin
+*.pkl
+*.joblib
 *.zip
-*.tar.gz
-*.tif
-*.tiff
-training/checkpoints/*_step*.pt
-training/checkpoints/*_frozen.pt
+*.7z
+*.tar
+*.gz
 
-# OS and Editor files
-.DS_Store
-Thumbs.db
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.cache/
+cache/
+caches/
+.env
+.env.*
+!.env.example
+
+# IDE
 .vscode/
 .idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,113 @@
+schema_version: airq.dataset-v2/0.1
+generation_config_version: 0.2.0-adopted-roi
+generator_version: 0.2.0
+phase: 0C
+remote_execution: manual_s5p_only
+destination: data/raw_v2
+design_blockers: []
+roi:
+  status: adopted_dataset_v2_project_specification
+  evidence: user_adoption_2026-09-15
+  crs: EPSG:4326
+  bounds: [79.95, 12.80, 80.45, 13.30]
+  interpretation: newly_adopted_project_specification_not_recovered_v1_provenance
+  statement: >-
+    The Dataset V2 Chennai ROI is a newly adopted project specification based on
+    the intended study corridor and audited stored coverage. It is not presented
+    as recovered provenance of the V1 exporter.
+temporal:
+  start: '2019-01-01T00:00:00Z'
+  requested_end: '2025-01-01T00:00:00Z'
+  days: 5
+  closure: '[start,end)'
+  trailing_partial: omit_and_report
+  label: next_five_day_composite
+  assignment: source_system_time_start_utc
+  availability: retrospective_OFFL_not_operational_latency
+grids:
+  crs: EPSG:32644
+  snap_m: 5000
+  s2_resolution_m: 20
+  s5p_resolution_m: 5000
+  fine_allocation_resolution_m: 500
+  footprint_rule: full_snapped_rectangle_no_roi_clipping
+  roi_statistics: pixel_center_inside_adopted_roi
+s2:
+  collection: COPERNICUS/S2_SR_HARMONIZED
+  processing_level: L2A
+  physical_bands: [B2, B3, B4, B5, B6, B7, B8, B11, B12]
+  native_resolution_m: [10, 10, 10, 20, 20, 20, 10, 20, 20]
+  scale: 0.0001
+  units: '1'
+  working_resolution_m: 20
+  physical_resampling: area_weighted_mean_from_native_pixels
+  qa_resampling: nearest_boolean
+  cloud_collection: COPERNICUS/S2_CLOUD_PROBABILITY
+  cloud_band: probability
+  cloud_join: system:index
+  missing_cloud_match: reject_and_record
+  scene_cloud_percentage_max_inclusive: 80
+  pixel_cloud_probability_max_exclusive: 40
+  scl_allow: [4, 5, 6]
+  edge_mask_bands: [B8A, B9]
+  reducer: median
+  index_order: after_temporal_reduction
+  indices: [NDVI, NDBI, NDMI]
+  index_pairs: [[B8, B4], [B11, B8], [B8, B11]]
+  denominator_rule: finite_and_not_equal_zero
+  common_physical_mask: all_nine_bands_and_QA
+  spatial_reducer: masked_area_weighted_mean_before_temporal_reduction
+  granule_overlap: per_datatake_sorted_asset_id_first_valid
+  clipping: none
+s5p:
+  reducer: mean
+  minimum_contributors: 1
+  count_semantics: accepted_orbit_L3_images_per_output_cell_not_L2_retrieval_count
+  spatial_reducer: masked_area_weighted_mean_per_orbit_before_temporal_mean
+  minimum_covered_cell_fraction: 0.5
+  nodata: NaN
+  zero_policy: preserve_if_source_valid
+  negative_policy: preserve_finite_values_passed_by_collection_source_rule_no_local_clipping
+  qa_summary: unavailable_in_EE_L3_do_not_fabricate
+  pollutants:
+    NO2:
+      collection: COPERNICUS/S5P/OFFL/L3_NO2
+      band: tropospheric_NO2_column_number_density
+      units: mol/m^2
+      semantics: tropospheric_vertical_column
+      qa_field_upstream: tropospheric_NO2_column_number_density_validity
+      qa_threshold: '>75 percent upstream Earth Engine L3 ingestion rule'
+      local_qa: source_L3_mask_and_finite_value_only_no_reconstructed_QA
+      negative_source_rule: finite values retained by the source collection; no local clipping
+    CO:
+      collection: COPERNICUS/S5P/OFFL/L3_CO
+      band: CO_column_number_density
+      units: mol/m^2
+      semantics: total_vertical_column
+      qa_field_upstream: CO_column_number_density_validity
+      qa_threshold: '>50 percent upstream HARP validity'
+      local_qa: source_L3_mask_and_finite_value_only_no_reconstructed_QA
+      negative_source_rule: finite values retained by the source collection; no local clipping
+    SO2:
+      collection: COPERNICUS/S5P/OFFL/L3_SO2
+      band: SO2_column_number_density
+      units: mol/m^2
+      semantics: vertical_column_default_polluted_profile_not_15km_not_surface_concentration
+      qa_field_upstream: qa_value_adjusted_then_SO2_column_number_density_validity
+      qa_threshold: 'qa_value >0.5; HARP validity >50 percent'
+      upstream_rules:
+        snow_ice: '<0.5'
+        sulfurdioxide_total_air_mass_factor_polluted: '>0.1'
+        sulfurdioxide_total_vertical_column: '>-0.001 mol/m^2'
+        cloud_fraction_crb: '<0.3'
+        solar_zenith_angle: '<60 degrees'
+      local_qa: source_band_mask_no_reapplication_to_L3_averages
+      negative_source_rule: source ingestion rejects values below -0.001 mol/m^2; retained finite values are not clipped locally
+storage:
+  values: float32_nan_nodata
+  validity: uint8_per_band_0_invalid_1_valid_no_nodata
+  counts: uint16_per_band_0_no_contributors_no_nodata
+  compression: DEFLATE
+  overwrite: forbidden
+  sidecar_schema: airq.product-v2/0.1
+  manifest_schema: airq.manifest-v2/0.1

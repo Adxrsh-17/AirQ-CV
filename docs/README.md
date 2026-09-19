@@ -1,74 +1,25 @@
-# 🛰️ Satellite-Driven Multi-Pollutant Downscaling & Spatiotemporal Forecasting
+# Documentation Reading Order
 
-> **Project:** Satellite-Driven Multi-Pollutant Forecasting for Industrial and Respiratory Disease Risk Mapping  
-> **Team:** Team No. B6 | School of AI, Amrita Vishwa Vidyapeetham, Coimbatore  
-> **Target Region:** Chennai Industrial & Port Corridor (Manali, Ennore, Ambattur, Guindy, Chennai Port)  
-
----
-
-## 1. Project Directory Structure
-
-```text
-Projects/Dataset/
-├── configs/
-│   └── default_config.py           # Hyperparameters, paths, and training configs
-│
-├── data/
-│   ├── dataset.py                  # PyTorch Dataset loader (T=6 sliding sequence windows)
-│   ├── stream_utils.py             # High-speed in-memory streaming & caching engine
-│   ├── dataset_manifest.csv        # 5-day window pairing & metadata tracking sheet
-│   ├── s2_composites/              # Sentinel-2 12-channel high-res GeoTIFFs (100 m)
-│   └── s5p_composites/             # Sentinel-5P 3-channel coarse supervision GeoTIFFs (5.5 km)
-│
-├── models/
-│   ├── convlstm.py                 # Spatiotemporal ConvLSTM Cell & Downscaling Architecture
-│   └── loss.py                     # Area-Weighted Spatial Consistency Loss Layer
-│
-├── training/
-│   ├── trainer.py                  # PyTorch Trainer (AMP Mixed Precision, Cosine Annealing, Checkpoints)
-│   └── metrics.py                  # Physical evaluation metrics (MAE, RMSE, R2, Rel-Accuracy)
-│
-├── checkpoints/                    # Saved best model weights (.pth)
-├── logs/                           # Training history CSV logs & learning curves
-├── results/                        # Holdout 2024 test metrics and evaluation summaries
-├── outputs/                        # Kaggle/Local exported model checkpoints
-│
-├── run_sanity_check.py             # Sanity verification for shapes, loss, GPU/CPU & gradients
-├── main.py                         # Main training, validation, and holdout test runner
-├── train_kaggle_downscaling.py     # Standalone script for Kaggle GPU execution
-├── context.md                      # Comprehensive project context & scientific documentation
-└── dataset-details.md              # Dataset schema, band mapping, and physical specifications
-```
-
----
-
-## 2. Dataset & Splits (2019 – 2024)
-
-* **Temporal Cadence:** Uniform 5-day median composites (**438 total windows**).
-* **Sentinel-2 Input:** 12 spectral bands (B2, B3, B4, B5, B6, B7, B8, B11, B12, NDVI, NDBI, NDMI) at $100\,\text{m}$ resolution ($558 \times 558$ grid).
-* **Sentinel-5P Target:** 3 atmospheric gases ($\text{NO}_2, \text{CO}, \text{SO}_2$) at $5.5\,\text{km}$ resolution ($13 \times 13$ coarse grid).
-* **Chronological Splits:**
-  * **Train Split ($2019\text{–}2022$):** $293$ windows ($year \le 2022$)
-  * **Validation Split ($2023$):** $73$ windows ($year == 2023$)
-  * **Holdout Test Split ($2024$):** $72$ windows ($year == 2024$)
-
----
-
-## 3. Quick Start & Execution
-
-### Step 1: Run Sanity Check
-Verifies tensor shapes, forward/backward passes, consistency loss, and hardware execution:
-```bash
-python run_sanity_check.py
-```
-
-### Step 2: Run Spatiotemporal ConvLSTM Baseline
-Trains the multi-layer ConvLSTM model across the training split and evaluates against the holdout 2024 test ground truth:
-```bash
-python main.py --epochs 25 --batch_size 4 --patch_size 64
-```
-
-### Step 3: Run on Kaggle GPU
-```bash
-python train_kaggle_downscaling.py --epochs 30 --batch_size 8 --patch_size 128
-```
+1. `00_PROJECT_OVERVIEW.md`
+2. `01_SCOPE_AND_CLAIMS.md`
+3. `02_DATA_CONTRACT.md`
+4. `03_DATA_PASTE_GUIDE.md`
+5. `04_DATA_AUDIT_PLAN.md`
+6. `05_SPLIT_AND_LEAKAGE_PROTOCOL.md`
+7. `06_BASELINES.md`
+8. `07_ARCHITECTURE_PLAN.md`
+9. `08_LOSSES_AND_PHYSICS.md`
+10. `09_TRAINING_PROTOCOL.md`
+11. `10_EVALUATION_PROTOCOL.md`
+12. `11_TESTING_PROTOCOL.md`
+13. `12_EXPERIMENT_LADDER.md`
+14. `13_FAILURES_TO_AVOID.md`
+15. `14_ASTRA_EXECUTION_RULES.md`
+16. `15_RESULTS_TEMPLATE.md`
+17. `16_HEALTH_RISK_PHASE.md`
+18. `17_FRIEND_SHARE_OVERVIEW.md`
+19. `18_EXTERNAL_MODELS_AND_REFERENCES.md`
+20. `19_PHASE0_VERIFIED_DATA_CONTRACT.md`
+21. `phase0_sources.md`
+22. `20_DATASET_PROVENANCE.md` — Phase 0B closure; scientific gate remains FAIL.
+23. `21_DATASET_V2_DESIGN.md` — Phase 0C design; export remains blocked pending ROI adoption.
