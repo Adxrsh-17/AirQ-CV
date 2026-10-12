@@ -1,0 +1,144 @@
+## Short-Term Forecasting — 1–5 Days
+
+### NO₂
+
+| Model                            | Paradigm          |         R² |           RMSE |  Pearson r |       SSIM | Plume CSI (Q90) | Mass Error | Status                |
+| -------------------------------- | ----------------- | ---------: | -------------: | ---------: | ---------: | --------------: | ---------: | --------------------- |
+| Persistence                      | Naive             |     0.1852 |     1.037×10⁻⁵ |     0.6299 |     0.6439 |          0.2984 |      6.15% | Decays rapidly        |
+| Monthly Climatology              | Statistical       |     0.5316 |     7.862×10⁻⁶ |     0.7403 |     0.7356 |          0.2987 |      4.58% | Strong seasonal floor |
+| **ConvGRU Decoupled ST-ResUNet** | **Deep Learning** | **0.6510** |     8.054×10⁻⁶ | **0.8100** | **0.8964** |      **0.3614** |  **2.15%** | **Champion**          |
+| LightGBM (Spatial Gradients)     | Tree ML           |     0.5479 | **7.724×10⁻⁶** |     0.7486 |     0.7293 |          0.3190 |      3.82% | Fast surrogate        |
+
+### CO
+
+| Model                             | Paradigm      |         R² |           RMSE |  Pearson r |       SSIM | Plume CSI (Q90) | Mass Error | Status             |
+| --------------------------------- | ------------- | ---------: | -------------: | ---------: | ---------: | --------------: | ---------: | ------------------ |
+| Persistence                       | Naive         |    −0.6431 |     8.702×10⁻³ |     0.5548 |     0.5960 |          0.1298 |      5.76% | Failed             |
+| Monthly Climatology               | Statistical   |     0.6830 |     3.823×10⁻³ |     0.8344 |     0.7117 |          0.0941 |      1.47% | Strong baseline    |
+| ConvGRU Decoupled ST-ResUNet      | Deep Learning |     0.6213 |     4.129×10⁻³ |     0.7991 |     0.6075 |          0.1627 |      1.12% | Strong correlation |
+| **Multi-Scale Regularized Ridge** | **ML**        | **0.6927** | **3.764×10⁻³** | **0.8352** | **0.7190** |          0.0907 |  **0.81%** | **Champion**       |
+
+### SO₂
+
+| Model                           | Paradigm      |      R² |           RMSE |  Pearson r |       SSIM | Plume CSI (Q90) | Mass Error | Status                       |
+| ------------------------------- | ------------- | ------: | -------------: | ---------: | ---------: | --------------: | ---------: | ---------------------------- |
+| Persistence                     | Naive         | −0.6987 |     1.770×10⁻⁴ |     0.1565 |     0.2272 |          0.0817 |     27.17% | Failed                       |
+| Monthly Climatology             | Statistical   |  0.0592 | **1.317×10⁻⁴** |     0.2845 |     0.2886 |          0.0841 |  **0.25%** | Background mean              |
+| ConvGRU Decoupled ST-ResUNet    | Deep Learning |  0.0715 |     1.362×10⁻⁴ | **0.3146** | **0.5761** |          0.0871 |      4.32% | Best continuous mapping      |
+| **Two-Stage Hurdle Classifier** | **ML Hazard** | **N/A** |     1.378×10⁻⁴ |     0.2750 |     0.2556 |      **0.1109** |      2.29% | **AUC 0.6156; Recall 53.5%** |
+
+---
+
+# Long-Term Forecasting — 150 Days
+
+### NO₂
+
+| Model                           | Paradigm        |         R² |           RMSE |  Pearson r |       SSIM |        CSI | Mass Error | Status           |
+| ------------------------------- | --------------- | ---------: | -------------: | ---------: | ---------: | ---------: | ---------: | ---------------- |
+| Persistence                     | Naive           |    −0.0180 |     1.159×10⁻⁵ |     0.5115 |     0.6072 |     0.2261 |      4.31% | Negative skill   |
+| ConvGRU                         | Deep Learning   |     0.2104 |     1.021×10⁻⁵ |     0.4851 |     0.6412 |     0.1824 |     14.82% | Degraded         |
+| Regularized Ridge               | Linear ML       |     0.5170 |     7.983×10⁻⁶ |     0.7393 |     0.7341 |     0.2903 |      6.75% | Near climatology |
+| **Monthly Spatial Climatology** | **Statistical** | **0.5316** | **7.862×10⁻⁶** | **0.7403** | **0.7356** | **0.2987** |  **4.58%** | **Champion**     |
+
+### CO
+## Short-Term Forecasting — 1–5 Days
+
+### NO₂
+
+| Model                            | Paradigm          |         R² |           RMSE |  Pearson r |       SSIM | Plume CSI (Q90) | Mass Error | Status                |
+| -------------------------------- | ----------------- | ---------: | -------------: | ---------: | ---------: | --------------: | ---------: | --------------------- |
+| Persistence                      | Naive             |     0.1852 |     1.037×10⁻⁵ |     0.6299 |     0.6439 |          0.2984 |      6.15% | Decays rapidly        |
+| Monthly Climatology              | Statistical       |     0.5316 |     7.862×10⁻⁶ |     0.7403 |     0.7356 |          0.2987 |      4.58% | Strong seasonal floor |
+| **ConvGRU Decoupled ST-ResUNet** | **Deep Learning** | **0.6510** |     8.054×10⁻⁶ | **0.8100** | **0.8964** |      **0.3614** |  **2.15%** | **Champion**          |
+| LightGBM (Spatial Gradients)     | Tree ML           |     0.5479 | **7.724×10⁻⁶** |     0.7486 |     0.7293 |          0.3190 |      3.82% | Fast surrogate        |
+
+### CO
+
+| Model                             | Paradigm      |         R² |           RMSE |  Pearson r |       SSIM | Plume CSI (Q90) | Mass Error | Status             |
+| --------------------------------- | ------------- | ---------: | -------------: | ---------: | ---------: | --------------: | ---------: | ------------------ |
+| Persistence                       | Naive         |    −0.6431 |     8.702×10⁻³ |     0.5548 |     0.5960 |          0.1298 |      5.76% | Failed             |
+| Monthly Climatology               | Statistical   |     0.6830 |     3.823×10⁻³ |     0.8344 |     0.7117 |          0.0941 |      1.47% | Strong baseline    |
+| ConvGRU Decoupled ST-ResUNet      | Deep Learning |     0.6213 |     4.129×10⁻³ |     0.7991 |     0.6075 |          0.1627 |      1.12% | Strong correlation |
+| **Multi-Scale Regularized Ridge** | **ML**        | **0.6927** | **3.764×10⁻³** | **0.8352** | **0.7190** |          0.0907 |  **0.81%** | **Champion**       |
+
+### SO₂
+
+| Model                           | Paradigm      |      R² |           RMSE |  Pearson r |       SSIM | Plume CSI (Q90) | Mass Error | Status                       |
+| ------------------------------- | ------------- | ------: | -------------: | ---------: | ---------: | --------------: | ---------: | ---------------------------- |
+| Persistence                     | Naive         | −0.6987 |     1.770×10⁻⁴ |     0.1565 |     0.2272 |          0.0817 |     27.17% | Failed                       |
+| Monthly Climatology             | Statistical   |  0.0592 | **1.317×10⁻⁴** |     0.2845 |     0.2886 |          0.0841 |  **0.25%** | Background mean              |
+| ConvGRU Decoupled ST-ResUNet    | Deep Learning |  0.0715 |     1.362×10⁻⁴ | **0.3146** | **0.5761** |          0.0871 |      4.32% | Best continuous mapping      |
+| **Two-Stage Hurdle Classifier** | **ML Hazard** | **N/A** |     1.378×10⁻⁴ |     0.2750 |     0.2556 |      **0.1109** |      2.29% | **AUC 0.6156; Recall 53.5%** |
+
+---
+
+# Long-Term Forecasting — 150 Days
+
+### NO₂
+
+| Model                           | Paradigm        |         R² |           RMSE |  Pearson r |       SSIM |        CSI | Mass Error | Status           |
+| ------------------------------- | --------------- | ---------: | -------------: | ---------: | ---------: | ---------: | ---------: | ---------------- |
+| Persistence                     | Naive           |    −0.0180 |     1.159×10⁻⁵ |     0.5115 |     0.6072 |     0.2261 |      4.31% | Negative skill   |
+| ConvGRU                         | Deep Learning   |     0.2104 |     1.021×10⁻⁵ |     0.4851 |     0.6412 |     0.1824 |     14.82% | Degraded         |
+| Regularized Ridge               | Linear ML       |     0.5170 |     7.983×10⁻⁶ |     0.7393 |     0.7341 |     0.2903 |      6.75% | Near climatology |
+| **Monthly Spatial Climatology** | **Statistical** | **0.5316** | **7.862×10⁻⁶** | **0.7403** | **0.7356** | **0.2987** |  **4.58%** | **Champion**     |
+
+### CO
+
+| Model                   | Paradigm                |         R² |           RMSE |  Pearson r |   SSIM |    CSI | Mass Error | Status          |
+| ----------------------- | ----------------------- | ---------: | -------------: | ---------: | -----: | -----: | ---------: | --------------- |
+| Persistence             | Naive                   |    −0.5238 |     8.380×10⁻³ |     0.5224 | 0.5776 | 0.0966 |      5.47% | Failed          |
+| ConvGRU                 | Deep Learning           |    −0.3412 |     7.612×10⁻³ |     0.3415 | 0.5821 | 0.0512 |     18.45% | **Failed**      |
+| Monthly Climatology     | Statistical             |     0.6830 |     3.823×10⁻³ |     0.8344 | 0.7117 | 0.0941 |  **1.47%** | Strong baseline |
+| **Harmonic + ENSO/IOD** | **Climate-informed ML** | **0.6872** | **3.797×10⁻³** | **0.8350** | 0.7106 | 0.0861 |      1.61% | **Champion**    |
+
+### SO₂
+
+| Model                    | Paradigm      |      R² |           RMSE |  Pearson r |       SSIM |                      ROC-AUC / PR-AUC | Mass Error | Status       |
+| ------------------------ | ------------- | ------: | -------------: | ---------: | ---------: | ------------------------------------: | ---------: | ------------ |
+| Persistence              | Naive         | −0.6722 |     1.756×10⁻⁴ |     0.0962 |     0.2289 |                          CSI = 0.0709 |     27.17% | Failed       |
+| ConvGRU                  | Deep Learning | −0.5824 |     1.890×10⁻⁴ |     0.1241 |     0.4820 |                          CSI = 0.0410 |     38.10% | **Failed**   |
+| Monthly Climatology      | Statistical   |  0.0592 | **1.317×10⁻⁴** |     0.2845 |     0.2886 |                          CSI = 0.0841 |  **0.25%** | Baseline     |
+| **HistGradientBoosting** | **ML Hazard** | **N/A** |     1.370×10⁻⁴ | **0.2896** | **0.3041** | **ROC-AUC = 0.6174; PR-AUC = 0.3974** |     21.91% | **Champion** |
+
+---
+
+# Overall Champion Portfolio
+
+| Horizon      | Pollutant | Champion Model                | Model Type          |       Primary Metric |
+| ------------ | --------- | ----------------------------- | ------------------- | -------------------: |
+| **1–5 Days** | **NO₂**   | ConvGRU Decoupled ST-ResUNet  | Deep Learning       |      **R² = 0.6510** |
+| **1–5 Days** | **CO**    | Multi-Scale Regularized Ridge | ML                  |      **R² = 0.6927** |
+| **1–5 Days** | **SO₂**   | Two-Stage Hurdle Classifier   | ML Hazard           |     **AUC = 0.6156** |
+| **150 Days** | **NO₂**   | Monthly Spatial Climatology   | Statistical         |      **R² = 0.5316** |
+| **150 Days** | **CO**    | Harmonic + ENSO/IOD           | Climate-informed ML |      **R² = 0.6872** |
+| **150 Days** | **SO₂**   | HistGradientBoosting          | ML Hazard           | **ROC-AUC = 0.6174** |
+
+| Model                   | Paradigm                |         R² |           RMSE |  Pearson r |   SSIM |    CSI | Mass Error | Status          |
+| ----------------------- | ----------------------- | ---------: | -------------: | ---------: | -----: | -----: | ---------: | --------------- |
+| Persistence             | Naive                   |    −0.5238 |     8.380×10⁻³ |     0.5224 | 0.5776 | 0.0966 |      5.47% | Failed          |
+| ConvGRU                 | Deep Learning           |    −0.3412 |     7.612×10⁻³ |     0.3415 | 0.5821 | 0.0512 |     18.45% | **Failed**      |
+| Monthly Climatology     | Statistical             |     0.6830 |     3.823×10⁻³ |     0.8344 | 0.7117 | 0.0941 |  **1.47%** | Strong baseline |
+| **Harmonic + ENSO/IOD** | **Climate-informed ML** | **0.6872** | **3.797×10⁻³** | **0.8350** | 0.7106 | 0.0861 |      1.61% | **Champion**    |
+
+### SO₂
+
+| Model                    | Paradigm      |      R² |           RMSE |  Pearson r |       SSIM |                      ROC-AUC / PR-AUC | Mass Error | Status       |
+| ------------------------ | ------------- | ------: | -------------: | ---------: | ---------: | ------------------------------------: | ---------: | ------------ |
+| Persistence              | Naive         | −0.6722 |     1.756×10⁻⁴ |     0.0962 |     0.2289 |                          CSI = 0.0709 |     27.17% | Failed       |
+| ConvGRU                  | Deep Learning | −0.5824 |     1.890×10⁻⁴ |     0.1241 |     0.4820 |                          CSI = 0.0410 |     38.10% | **Failed**   |
+| Monthly Climatology      | Statistical   |  0.0592 | **1.317×10⁻⁴** |     0.2845 |     0.2886 |                          CSI = 0.0841 |  **0.25%** | Baseline     |
+| **HistGradientBoosting** | **ML Hazard** | **N/A** |     1.370×10⁻⁴ | **0.2896** | **0.3041** | **ROC-AUC = 0.6174; PR-AUC = 0.3974** |     21.91% | **Champion** |
+
+---
+
+# Overall Best-Results Pollutant wise Model Specific Portfolio
+
+| Horizon      | Pollutant | Champion Model                | Model Type          |       Primary Metric |
+| ------------ | --------- | ----------------------------- | ------------------- | -------------------: |
+| **1–5 Days** | **NO₂**   | ConvGRU Decoupled ST-ResUNet  | Deep Learning       |      **R² = 0.6510** |
+| **1–5 Days** | **CO**    | Multi-Scale Regularized Ridge | ML                  |      **R² = 0.6927** |
+| **1–5 Days** | **SO₂**   | Two-Stage Hurdle Classifier   | ML Hazard           |     **AUC = 0.6156** |
+| **150 Days** | **NO₂**   | Monthly Spatial Climatology   | Statistical         |      **R² = 0.5316** |
+| **150 Days** | **CO**    | Harmonic + ENSO/IOD           | Climate-informed ML |      **R² = 0.6872** |
+| **150 Days** | **SO₂**   | HistGradientBoosting          | ML Hazard           | **ROC-AUC = 0.6174** |
