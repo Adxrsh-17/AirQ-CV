@@ -1,238 +1,132 @@
-# Comparative Evaluation Report: AirQ vs. Project Phase 1
-## Satellite-Driven Multi-Pollutant Forecasting over Chennai / Tamil Nadu (2019–2024)
+# Dual-Clock Land-Change / NO2 Architecture — Execution Report
+
+Architecture doc: `IEEE_Dual_Clock_Land_Emission_Architecture_Proposal.txt` (attached in chat, not stored in repo).
+Session: [`sessions/session_20261019_181942/`](sessions/session_20261019_181942/) (config, log, per-iteration artifacts).
+Previous `report.md` (11 Oct) was replaced; copy kept at [`outputs/report_previous_20261011.md`](outputs/report_previous_20261011.md) and in git history.
+
+**Headline.** Land change did **not** pass Gate G2, so the structural shift `B` is **0**. After iteration 4 (rolling memory added, user-requested), the frozen model scores **+4.7 pp on 2023 val** but only **+1.5 pp on 2024 test** (95% CI +0.1 to +3.1 pp), *below* damped persistence (+2.1 pp), and skill is slightly negative at 150 d. The val gain did not carry to test. The iteration-3 config (before memory) scored +2.3 pp on test; I did not pick it because choosing by test would use the test year for selection. 2024 is also **not clean** (see §8). Treat all skill gains as small and uncertain.
 
 ---
 
-### Executive Summary
+## 1. Objective and architecture summary
 
-This report provides a rigorous technical, mathematical, and architectural evaluation comparing two parallel branches of the final-year research initiative on multi-pollutant satellite forecasting over Chennai and Tamil Nadu:
-1. **Antonio Roger's Repository (`AirQ` / `antonioroger2/AirQ`)**: A clean, modular `uv`-managed Python package featuring harmonic climatology, damped anomaly persistence, pooled tabular machine learning (Ridge & LightGBM), rolling-origin validation, strict leakage prevention unit tests, and operational GeoTIFF outlook generation for 2025.
-2. **Our Project Codebase (`Adarsh[PHASE-1]`)**: A high-capacity spatiotemporal deep learning and risk-modeling architecture featuring **ConvGRU Decoupled ST-ResUNet**, Multi-Scale Regularized Ridge, **Two-Stage Hurdle / Cost-Sensitive Extreme Classifiers** for sparse $\text{SO}_2$, and Climate Teleconnection models (ENSO/IOD).
-
-#### Diagnostic Verdict: Is AirQ on the Right Path?
-**Yes, unequivocally, from a scientific integrity and data-engineering standpoint.** Antonio’s `AirQ` is methodologically sound, strictly guards against data leakage, and independently validates the physical atmospheric predictability limits identified in our Phase 7 research. 
-
-However, **it is overly conservative in its modeling scope and contains two major blind spots**:
-1. **Premature Abandonment of Deep Learning**: It evaluated only 1D temporal autocorrelation decay ($5\text{--}15\text{ days}$) and dismissed spatiotemporal deep learning (skipping ConvLSTM/ST-ResUNet), missing the 2D spatial plume advection and sharp edge preservation achieved by our **ST-ResUNet** ($R^2 = 0.6510$, $\text{SSIM} = 0.8964$).
-2. **Defaulting $\text{SO}_2$ to Zero Skill**: Because continuous MSE regression fails on sparse point-source plumes, `AirQ` concluded $\text{SO}_2$ is unforecastable beyond climatology. Our project resolved this exact pathology by reformulating $\text{SO}_2$ into a **Two-Stage Hurdle / Exceedance Classifier** ($\text{ROC-AUC} = 0.6174$, $53.5\%$ recall), providing actionable industrial hazard warnings.
-
-The optimal strategy is a **direct synthesis**: embedding our high-performing ConvGRU ST-ResUNet, Hurdle Classifier, and ENSO teleconnections into the robust, leakage-tested, modular framework of `AirQ`.
-
----
-
-## 1. Methodological Approaches: Technical Breakdown
+Test whether annual land change explains local NO2 change (C2), and whether that helps multi-horizon NO2 forecasts (fusion), while a fast anomaly model (C3) handles short leads.
 
 ```
-+---------------------------------------------------------------------------------------------------+
-|                                  DATA INGESTION & QUALITY PIPELINE                                |
-|  - Sentinel-5P (NO2, CO, SO2): 438 5-day composites (2019-2024) on 12x12 grid (~5 km)             |
-|  - Data Quality: Exact zeros = cloud-screened missing retrievals (masked out of loss & metrics)   |
-|  - Sentinel-2: 12 optical bands (100 m) aggregated as STATIC spatial context (solves 69% cloud gap) |
-+-------------------------------------------------+-------------------------------------------------+
-                                                  |
-                         +------------------------+------------------------+
-                         |                                                 |
-                         v                                                 v
-+---------------------------------------------------+ +---------------------------------------------------+
-|            ANTONIO ROGER'S `AirQ` PIPELINE        | |              OUR PROJECT PIPELINE               |
-|                                                   | |                                                   |
-| - Target Space: Standardized anomalies relative   | | - Target Space: Continuous spatiotemporal patches |
-|   to per-pixel harmonic climatology (k=3 modes)   |   with masked loss + log-space hurdle transforms    |
-| - Feature Space: 1D pooled tabular dataset (27    | | - Feature Space: Full 2D spatiotemporal tensors   |
-|   features: lags 0-5, 3x3 neighbor mean, trailing |   with multi-channel context & spatial convolutions |
-|   30/60/90-day area anomalies, static S2)         | | - Model Architectures:                            |
-| - Model Architectures:                            |   * Short-Term NO2: ConvGRU Decoupled ST-ResUNet    |
-|   * Baselines: Harmonic Climatology, Damped AR(1) |   * Short-Term CO: Multi-Scale Regularized Ridge    |
-|   * Learned: Pooled Ridge & LightGBM              |   * Short/Long SO2: Two-Stage Hurdle Classifier     |
-|   * Long-Term (150d): Direct multi-horizon        |   * Long-Term CO: Harmonic + ENSO/IOD Modes         |
-|     LightGBM/Ridge conditioned on lead h          |   * Long-Term NO2: Monthly Spatial Climatology      |
-| - Uncertainty: LOYO empirical residual quantiles  | | - Uncertainty: Patch-level prediction intervals   |
-| - Validation: Rolling-origin (2021-2023) +        | | - Validation: Strict chronological holdout        |
-|   Single locked test on 2024 (TEST_SCORED.json)   |   (Train: 2019-2022, Holdout Test: 2023-2024)       |
-+---------------------------------------------------+ +---------------------------------------------------+
+Jan–Mar S2 composite -> C1 land features (NDVI,NDBI,BSI,MNDWI per 5km cell, dL vs 2019)
+S5P NO2 -> regional common-mode normalisation -> annual Y[p,y] -> C2 two-way FE panel -> beta,theta -> gate G2 -> B
+S5P NO2 (+past CO) -> anomalies vs climatology -> C3 Ridge/persistence -> A_hat
+F[p,t+h] = Clim[p,s(t+h)] + B + g(h)*A_hat ;  10/50/90% = F + empirical out-of-fold residual quantiles
 ```
+Leads 5,10,20,30,60,120,150 d = 1,2,4,6,12,24,30 five-day windows. `g(h)` is fitted on honest nested leave-one-year-out CV, clipped to [0,1], isotonic non-increasing in lead.
+**Primary metric:** mean over 7 leads of `skill = 1 − MSE_model / MSE_ref`, ref = frozen climatology (smoothing k=2), valid Chennai pixels, target year 2023.
 
-### 1.1 Data Quality & Physical Preprocessing
-Both codebases demonstrate exceptional convergence on physical realities that naive remote-sensing studies often get wrong:
-* **Zeros as Missing Data, Not Clean Air**: In Sentinel-5P Level-3 composites, pixels with exact value $0.000$ represent cloud-screened missing observations, not zero atmospheric concentration. Total column $\text{CO}$ is never physically zero (empirical median is $0.038\ \text{mol/m}^2$, with no valid values below $0.0145$). Both pipelines correctly mask zeros from training losses and verification metrics.
-* **Sentinel-2 as Static Spatial Context**: Both pipelines proved that raw Sentinel-2 optical imagery cannot be used as dynamic time-varying inputs for forecasting because **$69\%$ of monsoon windows are missing due to cloud gaps**. Furthermore, land cover (built-up density, vegetation) is statistically stationary over a 6-year period. Treating Sentinel-2 as static spatial context (mean NDVI/NDBI per S5P pixel) eliminates missing-channel crashes and prevents multi-step data leakage.
+## 2. Data used (`data/processed` only, read-only)
 
-### 1.2 Model Architecture Comparison
+| Item | Detail |
+|---|---|
+| S5P composites | 438 five-day windows 2019-01-01…2024-12-25, 3 bands (NO2, CO, SO2), 123×95 grid @0.0449° (whole Tamil Nadu). Exact 0 = missing → NaN (NO2 11.4% missing; 7.3% in crop). CO used only as a past-anomaly proxy. |
+| S2 composites | 415 of 438 windows (23 cloud gaps), 12 bands @0.0054°. Used: Jan–Mar windows only (18–19 per year, 2019–2024), per-pixel median of cloud-free windows, then NDVI/NDBI/BSI/MNDWI, valid-pixel mean per S5P cell (valid fraction 99.9%). Collection per acquisition notebook: `S2_SR_HARMONIZED`. |
+| Chennai crop | S5P grid rows 6–17, cols 83–94 (12×12, ≈12.76–13.30°N, 79.9–80.44°E). Inferred from `context.md` bbox; check it matches your intended 12×12. |
+| Not used | `cached_dataset_256.pt`, `dataset.py`, `stream_utils.py`, SO2. |
+| Missing vs spec | ERA5, VIIRS, AlphaEarth, Dynamic World, Open Buildings, any 2025 NO2, S5P processor-version tags (notebook shows `OFFL`, so mixed versions likely). |
 
-#### Short-Term Models ($H = 1$, 5 Days Ahead)
-* **AirQ**: 
-  * Fits a 3-harmonic per-pixel seasonal baseline ($k=3$).
-  * Damped Anomaly Persistence ($a_{t+1} = \phi_1 a_t$).
-  * Pooled tabular **Ridge Regression** and **LightGBM** using 27 features (lags, 3×3 neighbor averages, trailing 30/60/90-day mean anomalies, static S2).
-* **Our Project**:
-  * **ConvGRU Decoupled ST-ResUNet**: An encoder-decoder architecture that retains 2D spatial feature maps through convolutional residual blocks, propagating temporal state through ConvGRU recurrent units. Individual decoder heads decouple pollutant-specific chemical behaviors while sharing spatial convolutional representations.
-  * **Multi-Scale Regularized Ridge**: Multi-resolution spatial linear filtering with mass-conservation regularization.
-  * **Two-Stage Hurdle Classifier**: A dual-stage framework separating zero/cloud masking from extreme plume exceedance modeling ($> Q_{90}$).
+Data hashes and package versions: `sessions/…/config.json`. Regression task, so no class balance.
 
-#### Long-Term Sub-Seasonal Models ($H = 30$, 150 Days Ahead)
-* **AirQ**:
-  * Multi-horizon direct Ridge and LightGBM models conditioned on lead step $h$.
-  * Discovered that long-range learned models failed outside 2023 (Ridge skill dropped to $-4.7\%$ on the 2024 test set).
-  * **Final Decision**: Froze the long-range outlook to **Harmonic Seasonal Climatology** with out-of-sample calibrated $80\%$ uncertainty intervals.
-* **Our Project**:
-  * Demonstrated that recursive/direct deep learning collapses on long horizons due to the **Lorenz atmospheric predictability limit** (weather memory decays with an e-folding timescale $\tau \approx 10\text{--}20\text{ days}$).
-  * Selected **Monthly Spatial Climatology** as the true ceiling for $\text{NO}_2$ ($R^2 = 0.5316$).
-  * Formulated **Harmonic + ENSO/IOD Regression** for $\text{CO}$ ($R^2 = 0.6872$), capturing macro-scale climate teleconnections.
-  * Formulated **HistGradientBoosting Cost-Sensitive Classifier** for $\text{SO}_2$ ($\text{ROC-AUC} = 0.6174$), maintaining early-warning capability where continuous regression breaks down.
+## 3. Baseline vs final
 
----
+Baseline = spec as written (k=2, Ridge α=10, B=0, nested-CV gate). Final = best config on val after iteration 4 (k=4, α=300, + past CO anomaly, + 30d/120d rolling anomaly memory).
 
-## 2. Metric Reconciliation: Skill Score vs. $R^2$
+| Metric (mean skill vs clim, 7 leads) | Baseline | Final (iter 4) | Damped persistence (same clim as final) | Iter-3 config, for reference |
+|---|---|---|---|---|
+| **Val 2023 (tuned)** | +0.0215 | **+0.0469** (CI +0.036…+0.058) | +0.0280 (CI +0.021…+0.036) | +0.0368 |
+| **Test 2024 (frozen)** | +0.0031 (CI −0.005…+0.012) | **+0.0151** (CI +0.001…+0.031) | +0.0210 (CI +0.007…+0.034) | +0.0226 (CI +0.009…+0.039) |
+| 80% interval coverage (mean) val / test | 0.800 / 0.834 | 0.793 / 0.827 | n/a | 0.793 / 0.829 |
 
-A critical prerequisite for comparing results is recognizing the mathematical distinction between the primary metrics used in each project:
+Final skill by lead (days):
 
-$$\text{AirQ MSE Skill Score} = 1 - \frac{\text{MSE}_{\text{model}}}{\text{MSE}_{\text{climatology}}}$$
+| Lead | 5 | 10 | 20 | 30 | 60 | 120 | 150 |
+|---|---|---|---|---|---|---|---|
+| Val 2023 | +.119 | +.045 | +.044 | +.043 | +.029 | +.034 | +.013 |
+| Test 2024 | +.045 | +.016 | +.024 | +.016 | +.006 | +.001 | −.003 |
+| Test persistence | +.050 | +.021 | +.022 | +.017 | +.012 | +.009 | +.016 |
+| Test, iter-3 config | +.043 | +.017 | +.027 | +.025 | +.014 | +.013 | +.020 |
 
-$$\text{Our Standard } R^2 \text{ Score} = 1 - \frac{\text{MSE}_{\text{model}}}{\text{MSE}_{\text{global\_mean}}}$$
+CIs: moving-block bootstrap (6 windows) over target windows, 1000 draws. Mean pinball (q10/q50/q90) test ≈ 0.377 (1e-5 mol/m² units). CRPS not computed. Part of the baseline→final gain is the smoother climatology, which also lifts persistence (0.0123→0.0280 on val), so fused-minus-persistence is the cleaner number: **+1.9 pp val, −0.6 pp test**. The learned gate on the test run is `g = [1.0, .78, .76, .76, .66, .66, .41]`, so long leads are still only partly shrunk even though the memory features did not help there.
 
-* In **AirQ**, the reference baseline is the **per-pixel seasonal harmonic climatology**. Hence, Climatology has a Skill of **$0.0\%$ by definition**. A model with $+3.1\%$ or $+12.7\%$ Skill represents predictive capability **above and beyond the entire seasonal cycle**.
-* In **Our Project**, the reference baseline is the **global sample mean**. The Seasonal Climatology itself explains **$53.16\%$** of variance for $\text{NO}_2$ ($R^2 = 0.5316$) and **$68.30\%$** of variance for $\text{CO}$ ($R^2 = 0.6830$).
-* **Exact Mathematical Conversion**:
-  $$\text{Skill}_{\text{clim}} = 1 - \frac{1 - R^2_{\text{model}}}{1 - R^2_{\text{clim}}}$$
-  For our ConvGRU ST-ResUNet on $\text{NO}_2$ ($R^2 = 0.6510$, $R^2_{\text{clim}} = 0.5316$):
-  $$\text{Skill}_{\text{clim}} = 1 - \frac{1 - 0.6510}{1 - 0.5316} = 1 - \frac{0.3490}{0.4684} = \mathbf{+25.49\%}$$
-  Our short-term deep learning model delivers **$+25.5\%$ skill above climatology**, compared to $+3.9\%$ for AirQ's Ridge on the test set.
+Strata on test (final model): winter +0.059, pre-monsoon +0.030, NE monsoon +0.003, **SW monsoon −0.011**; dNDBI tercile low/mid/high +0.013 / +0.030 / +0.011. No sign that skill rises where land change is larger (H3 unsupported).
 
----
+## 4. Iteration history (tuned on 2023 val only)
 
-## 3. Comprehensive Results Benchmark
+| # | Change | Val primary | Δ | Verdict |
+|---|---|---|---|---|
+| 0 | Baseline | +0.0215 | – | – |
+| 1 | Climatology smoothing k 2→4 | +0.0341 | +0.0126 | kept |
+| 2 | Ridge α 10→300 | +0.0342 | +0.00003 | kept (strictly higher, but noise) |
+| 3 | Add past CO anomaly (pixel + city mean) | +0.0368 | +0.0027 | kept |
+| – | Early stop triggered: gain < 0.5 pp twice in a row (iters 2, 3). | | | |
+| 4 | Add 30d/120d rolling anomaly memory (**post-stop, user-requested**) | +0.0469 | +0.0100 | kept (on val) |
 
-### 3.1 Short-Term Forecast: 1 to 5 Days (Lead 1 / $H = 1$)
+4 of 8 iterations used. Iteration 4 ran after the stop rule fired, because a val-only ablation had shown +1.0 pp.
+Overfit/gap check: train out-of-fold skill is +0.008 vs val +0.047, so the val year is much easier than the training years, and the val gain of iteration 4 did not replicate on 2024 (test fell from +0.023 to +0.015). That points to val-selection noise: 73 val windows, a +1 pp gain, and a CI of roughly ±1 pp. Chart: [iteration_history.png](outputs/plots/iteration_history.png).
 
-| Target Gas | Evaluated Model | Source Repo | $R^2$ Score | Skill vs. Clim | Pearson $r$ | Spatial SSIM | Plume CSI ($Q_{90}$) | Mass Err | Benchmark Assessment |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **$\text{NO}_2$** | Persistence ($t_0$) | Both | $0.1852$ | $-39.0\%$ | $0.6299$ | $0.6439$ | $0.2984$ | $6.15\%$ | Severe degradation; single-frame retrieval noise |
-| | Harmonic Climatology | Both | $0.5316$ | $0.0\%$ | $0.7403$ | $0.7356$ | $0.2987$ | $4.58\%$ | Empirical seasonal floor |
-| | Damped Persistence | AirQ | $\approx 0.546$ | $+3.10\%$ | $0.7510$ | $0.7410$ | $0.3012$ | $4.20\%$ | Robust simple baseline; positive every year |
-| | Tabular Ridge | AirQ | $\approx 0.550$ | $+3.92\%$ | $0.7540$ | $0.7430$ | $0.3080$ | $3.95\%$ | Tabular benchmark; pixel-flattened features |
-| | **ConvGRU ST-ResUNet** | **Ours** | **$0.6510$** | **$+25.49\%$** | **$0.8100$** | **$0.8964$** | **$0.3614$** | **$2.15\%$** | **Champion: Superior spatial gradient and plume tracking** |
-| **$\text{CO}$** | Persistence ($t_0$) | Both | $-0.6431$ | $-43.0\%$ | $0.5548$ | $0.5960$ | $0.1298$ | $5.76\%$ | Negative skill floor |
-| | Harmonic Climatology | Both | $0.6830$ | $0.0\%$ | $0.8344$ | $0.7117$ | $0.0941$ | $1.47\%$ | Strong regional baseline ($83\%$ variance share) |
-| | Damped Persistence | AirQ | $\approx 0.695$ | $+3.78\%$ | $0.8360$ | $0.7150$ | $0.0950$ | $1.20\%$ | Positive skill across test sets |
-| | Tabular LightGBM | AirQ | $\approx 0.678$ | $-1.35\%$ | $0.8290$ | $0.7080$ | $0.0920$ | $1.65\%$ | Overfit 2023 (+15.5%) but collapsed on 2024 test |
-| | ConvGRU ST-ResUNet | Ours | $0.6213$ | $-19.46\%$ | $0.7991$ | $0.6075$ | **$0.1627$** | $1.12\%$ | Recurrent over-parameterization on smooth regional gas |
-| | **Multi-Scale Ridge** | **Ours** | **$0.6927$** | **$+3.06\%$** | **$0.8352$** | **$0.7190$** | $0.0907$ | **$0.81\%$** | **Champion: Optimal linear regularized balance and mass conservation** |
-| **$\text{SO}_2$** | Persistence ($t_0$) | Both | $-0.6987$ | $-83.0\%$ | $0.1565$ | $0.2272$ | $0.0817$ | $27.17\%$ | Zero skill; intermittent releases |
-| | Harmonic Climatology | Both | $0.0592$ | $0.0\%$ | $0.2845$ | $0.2886$ | $0.0841$ | **$0.25\%$** | Stationary regional background only |
-| | Damped / Ridge | AirQ | $0.0570$ | $-0.16\%$ | $0.2790$ | $0.2810$ | $0.0830$ | $1.10\%$ | Continuous regression fails completely |
-| | ConvGRU ST-ResUNet | Ours | $0.0715$ | $+1.31\%$ | **$0.3146$** | **$0.5761$** | $0.0871$ | $4.32\%$ | Continuous spatial smoothing; misses peak releases |
-| | **Two-Stage Hurdle** | **Ours** | **N/A** | **N/A** | $0.2750$ | $0.2556$ | **$0.1109$** | $2.29\%$ | **Champion: ROC-AUC = 0.6156, Recall = 53.5% on industrial plumes** |
+## 5. C2 land-to-NO2 attribution (Gate results)
 
----
+- **G1 failed for Chennai alone**: 7 cells with persistent meaningful change (rule: |dNDVI| > 2×robust σ = 0.091 and dNDVI·dNDBI < 0, 2024 vs 2019; need ≥10). Panel expanded to the whole Tamil Nadu grid (11,562 cells, 6 years, 130 spatial blocks of 10×10 cells), not to other cities. Chennai stays the forecast target.
+- Y = annual mean of NO2 divided by the same-window TN median (ERA5 substitute). Fixed effects: cell + year. Regressor dNDBI (+ queen-ring neighbour mean). NTL term dropped (no VIIRS).
+- **β = 7.4e-7 mol/m² per unit dNDBI**, 95% block-bootstrap CI [2.6e-7, 1.2e-6]. One SD of dNDBI (0.051) ≈ 3.8e-8 mol/m², about 0.2% of mean NO2. θ (neighbours) CI includes 0. Chennai-only β = 1.3e-6, CI [−3.4e-6, 5.5e-6] (only 4 blocks, so the CI is not reliable).
+- **Falsification:** placebo (permute cell trajectories, 300×) p = **0.07** → fails; lead-lag (future dNDBI vs past Y) β = 1.1e-7, CI includes 0 → passes; alt dNDVI (sign-flipped) and dBSI have CIs including 0; dropping 2020 Q2 gives β = 6.9e-7 (stable); raw NO2 β = 5.3e-7.
+- **G2 = FAIL** (placebo p ≥ 0.05; alt features not significant) → **B = 0**. Detection limit (80% power) β ≈ 6.9e-7 for TN, 6.4e-6 for Chennai alone, so the TN estimate is at the detection limit. Result is "weak, fragile association; not accepted". It is an association, not causal.
+- **Lockdown diagnostic flagged:** Chennai Apr–Jun 2020 vs mean of 2019/2021: raw −24.0%, normalised −19.4% (TN median itself −5.9%). Normalisation made the dip *smaller*, because the common-mode proxy removes real regional signal. Per spec this means the procedure needs inspection; it is a crude proxy, not a deweathering model.
+- Not done: event studies (dates need public-source verification), processor-version sensitivity (no version metadata), Tier-2 Siamese U-Net, multi-city leave-one-city-out.
 
-### 3.2 Long-Term Sub-Seasonal Forecast: 150 Days Ahead (Lead 30 / $H = 30$)
+Charts: [c2_attribution.png](outputs/plots/c2_attribution.png), [c2_lockdown.png](outputs/plots/c2_lockdown.png), [chennai_maps.png](outputs/plots/chennai_maps.png).
 
-| Target Gas | Evaluated Model | Source Repo | $R^2$ Score | Skill vs. Clim | Pearson $r$ | Spatial SSIM | Key Operational Metric | Benchmark Assessment |
-| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |
-| **$\text{NO}_2$** | Direct Multi-Horizon Ridge | AirQ | $\approx 0.509$ | $-4.74\%$ | $0.7180$ | $0.7120$ | $\text{Coverage} = 81.1\%$ | Overfit 2023 (+5.6%) but significantly worse than climatology in 2024 |
-| | Autoregressive ConvGRU | Ours | $0.2104$ | $-68.57\%$ | $0.4851$ | $0.6412$ | $\text{CSI} = 0.1824$ | Severe error compounding beyond Lorenz predictability limit |
-| | **Monthly Climatology** | **Both** | **$0.5316$** | **$0.0\%$** | **$0.7403$** | **$0.7356$** | **$\text{Coverage} = 82.2\%$** | **Champion: Stable, drift-free empirical seasonal ceiling** |
-| **$\text{CO}$** | Direct Multi-Horizon Ridge | AirQ | $\approx 0.683$ | $0.0\%$ | $0.8340$ | $0.7110$ | $\text{Coverage} = 87.0\%$ | Converges to climatology beyond 10 days |
-| | Autoregressive ConvGRU | Ours | $-0.3412$ | $-323.0\%$ | $0.3415$ | $0.5821$ | $\text{CSI} = 0.0512$ | Negative skill ($R^2 < 0$); recursive drift |
-| | Monthly Climatology | Both | $0.6830$ | $0.0\%$ | $0.8344$ | $0.7117$ | $\text{Coverage} = 87.0\%$ | Solid baseline driven by strong annual cycle |
-| | **Harmonic + ENSO/IOD** | **Ours** | **$0.6872$** | **$+1.32\%$** | **$0.8350$** | **$0.7106$** | **$\text{Mass Err} = 1.61\%$** | **Champion: Captures inter-annual baseline shifts via climate teleconnections** |
-| **$\text{SO}_2$** | Direct Multi-Horizon Ridge | AirQ | $\approx 0.059$ | $0.0\%$ | $0.2810$ | $0.2850$ | $\text{Coverage} = 80.7\%$ | Defaulted to climatology (Skill = 0); no alert capability |
-| | Autoregressive ConvGRU | Ours | $-0.5824$ | $-68.10\%$ | $0.1241$ | $0.4820$ | $\text{CSI} = 0.0410$ | Severe regression failure on sparse point sources |
-| | Monthly Climatology | Both | $0.0592$ | $0.0\%$ | $0.2845$ | $0.2886$ | $\text{Coverage} = 80.7\%$ | Background mean; cannot warn of hazardous plume outbreaks |
-| | **HistGradientBoosting** | **Ours** | **N/A** | **N/A** | **$0.2896$** | **$0.3041$** | **$\text{ROC-AUC} = 0.6174$** | **Champion: PR-AUC = 0.3974; actionable 5-month industrial risk outlook** |
+## 6. Ablations (2023 val, mean skill)
 
----
+| Variant | Skill |
+|---|---|
+| Best config (reference, iter 4) | +0.0469 |
+| Without rolling 30d/120d memory | +0.0368 |
+| Without CO proxy | +0.0442 |
+| + latest land state L (NDVI, NDBI), static context | +0.0459 (no gain) |
+| Level-2 = LightGBM instead of Ridge | +0.0260 (worse) |
+| + structural shift B (in-sample β, optimistic) | +0.0446 (worse, consistent with G2 reject) |
 
-## 4. Critical Assessment: Which is Better?
+Not run: with/without ERA5, forecast-met variant, CNN/ConvGRU (Level 2 barely beats persistence, so the spec rule says do not escalate), full vs no-2020Q2 for C3, Tier 1 vs Tier 2.
 
-### 4.1 Where Our Project Codebase is Superior
-1. **Short-Term Spatial Gradient and Plume Advection ($\text{NO}_2$)**:
-   Our **ConvGRU Decoupled ST-ResUNet** is markedly superior to AirQ's tabular Ridge. By operating directly on 2D image tensors with spatial convolution filters, it achieves an **$\text{SSIM}$ of $0.8964$** (vs. $\sim 0.74$ for Ridge) and an **$R^2$ of $0.6510$** ($+25.5\%$ skill above climatology vs. $+3.9\%$). AirQ flattened the grid into 1D tabular rows, destroying spatial coherence.
-2. **Industrial $\text{SO}_2$ Risk Alerting**:
-   AirQ abandoned $\text{SO}_2$ after continuous regression yielded $0\%$ skill. Our project recognized that environmental regulators do not require continuous regression on near-zero noise; they require **early warning of plume threshold exceedances**. Our **Two-Stage Hurdle / HistGradientBoosting Classifier** achieves **$\text{ROC-AUC} = 0.6174$** and **$53.5\%$ recall**, delivering actionable hazard mapping.
-3. **Macro-Climate Teleconnections for $\text{CO}$**:
-   While AirQ limited its long-term $\text{CO}$ forecast to a static annual cycle, our project integrated **ENSO (El Niño Southern Oscillation)** and **IOD (Indian Ocean Dipole)** modes, boosting correlation to $r = 0.8350$ and capturing macro-climatic year-to-year shifts.
+Charts: [skill_vs_lead.png](outputs/plots/skill_vs_lead.png), [calibration_gate.png](outputs/plots/calibration_gate.png), [skill_strata.png](outputs/plots/skill_strata.png), [example_forecast_manali.png](outputs/plots/example_forecast_manali.png).
 
-### 4.2 Where Antonio’s `AirQ` is Superior
-1. **Software Architecture and Reproducibility**:
-   `AirQ` is built as a production-grade, modular `uv` workspace (`pyproject.toml`, `uv.lock`, `src/aqf/`). The entire suite of analysis, baseline fitting, training, ablation testing, and outlook generation runs through standardized CLI commands (`uv run aqf-analysis all`, `uv run aqf-forecast all`).
-2. **Automated Data Leakage Testing**:
-   AirQ includes automated unit tests (`test_no_lookahead_in_f2_features` and `test_no_lookahead_in_baselines`) that programmatically corrupt future data ($t > t_0$) and verify that past feature rows remain bitwise identical. This provides airtight proof against reviewer concerns regarding temporal leakage.
-3. **Multi-Year Rolling-Origin Validation**:
-   AirQ evaluated models across rolling retrospective years (2021, 2022, 2023), exposing that **2023 was an anomalous high-$\text{NO}_2$ year (+14%) that artificially flattered learned models**. Models that scored $+12.7\%$ in 2023 dropped to $+3.9\%$ in 2024 and $-3.5\%$ in 2021.
-4. **Calibrated Uncertainty Quantification and GIS Deliverables**:
-   AirQ constructed empirical $80\%$ central prediction intervals from leave-one-year-out residuals, achieving verified test-set coverage ($81.9\%\text{--}87.0\%$). Furthermore, it packaged the **Jan–May 2025 Outlook** into 90-band GeoTIFFs (mean, p10, p90) and time-series fan charts.
+## 7. Best configuration and reproduction
 
----
+Best config ([`outputs/best_config.json`](outputs/best_config.json)): `k=4, alpha=300, model=ridge, co=true, hist=true, land=false, B=0, seed=42`. To get the iteration-3 config, set `hist=false` in that file and run `finalize.py` (its test numbers are in §3).
+Outputs: [`outputs/best_model.pkl`](outputs/best_model.pkl) (trained on 2019–2023), [`outputs/best_output.csv`](outputs/best_output.csv) (val 2023 + test 2024 forecasts with q10/q50/q90, truth, climatology, persistence), `outputs/final_metrics.json`, `outputs/ablations_val2023.json`, `outputs/c2_results.json`, `outputs/iteration_history.csv`.
 
-## 5. Required Improvements & Unified Action Plan
-
-To establish a unified, state-of-the-art final year submission, the following five actionable improvements must be executed:
-
+Run from anywhere (paths resolve from the script location; ~4 min total):
+```bash
+python outputs/code/build_cube.py        # processed tifs -> outputs/cube/*.npz
+python outputs/code/c2_attribution.py    # C2 + G1/G2 -> outputs/c2_results.json
+python outputs/code/run_iterations.py    # baseline + iterations -> session log.md, config.json
+python outputs/code/iteration4.py        # post-stop iteration 4 (rolling memory); updates best_config.json
+python outputs/code/finalize.py          # freeze, score 2024, ablations, plots, best_model/output
 ```
-+---------------------------------------------------------------------------------------------------+
-|                               UNIFIED PHASE 2 ARCHITECTURAL INTEGRATION                           |
-+---------------------------------------------------------------------------------------------------+
-|                                                                                                   |
-|  [AirQ Engineering Core]                                                                          |
-|    - Modern uv workspace packaging + pyproject.toml                                               |
-|    - Automated test_no_lookahead feature leakage unit tests                                       |
-|    - Rolling-origin validation protocols & TEST_SCORED.json lock                                  |
-|    - Leave-one-year-out empirical prediction interval calibration                                 |
-|                                     |                                                             |
-|                                     +---> MERGED WITH                                             |
-|                                     |                                                             |
-|  [Our Champion Model Portfolio]                                                                   |
-|    1. Lead 1 NO2:  ConvGRU Decoupled ST-ResUNet (R² = 0.6510, SSIM = 0.8964)                     |
-|    2. Lead 1 CO:   Multi-Scale Regularized Ridge (R² = 0.6927, Mass Err = 0.81%)                 |
-|    3. Leads 1-30 SO2: Two-Stage Hurdle / Cost-Sensitive Classifier (ROC-AUC = 0.6174)             |
-|    4. Lead 30 CO:  Harmonic + ENSO/IOD Teleconnection Regression (R² = 0.6872)                    |
-|    5. Lead 30 NO2: Monthly Spatial Climatology Ceiling (R² = 0.5316)                              |
-|                                     |                                                             |
-|                                     v                                                             |
-|  [Unified GIS Production Deliverables]                                                            |
-|    - Operational 90-band GeoTIFFs (Mean, P10, P90) for all pollutants                            |
-|    - Interactive Leaflet / Streamlit Risk Dashboard with Hotspot Alerting                         |
-|    - Dual Metric Reporting: Standard R² (vs Mean) + Skill Score (vs Climatology)                  |
-|                                                                                                   |
-+---------------------------------------------------------------------------------------------------+
-```
+`run_iterations.py` reads the session folder from `outputs/code/.session_path`; write a new path there to start a fresh session. Packages and versions are in `config.json` (Python 3.12.7, numpy 2.4.6, pandas 3.0.5, scikit-learn 1.9.0, lightgbm 4.7.0, rasterio 1.5.0). Note: `finalize.py` has now scored 2024 three times: twice for the iteration-3 config (identical results; the rerun only fixed a NaN in a val-only ablation) and once for the iteration-4 config. The test year has therefore been looked at for two candidate configs.
 
-### Action Item 1: Port ConvGRU ST-ResUNet into the `AirQ` Package as Phase `F3`
-* **Deficiency**: `AirQ` left Phase `F3` (ConvLSTM) marked as "skipped / not justified" based solely on linear 1D autocorrelation decay.
-* **Correction**: Implement our **ConvGRU Decoupled ST-ResUNet** inside `Forecasting/src/aqf_forecast/st_resunet.py`. Re-enable `F3` to benchmark 2D convolutional representations directly against tabular Ridge. This will formally substantiate why spatial convolutional priors unlock **$+25.5\%$ skill** where 1D tabular models saturate at $+3.9\%$.
+## 8. Limitations, risks, next steps
 
-### Action Item 2: Integrate the Two-Stage Hurdle Classifier for $\text{SO}_2$
-* **Deficiency**: `AirQ` defaulted $\text{SO}_2$ to Climatology (Skill $= 0.0\%$), omitting industrial hazard monitoring.
-* **Correction**: Port the **Two-Stage Hurdle Classifier** into `aqf_forecast/so2_hurdle.py`. Provide dual-mode output:
-  1. Background continuous concentration (via empirical climatology).
-  2. Plume exceedance probability ($P(\text{SO}_2 > Q_{90})$) with verified **$\text{ROC-AUC} = 0.6174$** and alert classification maps.
+**Limitations**
+- **2024 is not a clean test.** It was used in earlier experiments and no 2025 data exists in `processed`. The spec's clean-2025 requirement is unmet.
+- **No ERA5.** Mode B (past meteorology), H4 and H5 are untestable; CO anomalies are only a weak proxy. "Deweathering" is regional-median ratio normalisation, which removed part of the lockdown signal.
+- **C1 is S2-index only**, from 6 annual composites (5 change years); no VIIRS, AlphaEarth, DW or OBT, so no true built-up fraction. Tier 2 not attempted.
+- Effective sample for C2 is tens of independent blocks, not 69k observations; the effect is at the detection limit.
+- NO2 processor versions are unknown (likely OFFL mix); a version artefact could mimic or hide a land effect.
+- C3 uses time splits only; no spatial-block validation across pixels (only 144 correlated cells). Chennai crop choice is inferred.
+- Quantile intervals are pooled, non-heteroscedastic residual quantiles: coverage ≈ 80% on average but not checked per season.
+- ~11% of NO2 cells are missing (cloud). Skill is measured on valid pixels only, so it is biased toward clear-sky windows.
 
-### Action Item 3: Add Macro-Climate Teleconnection Indices (ENSO / IOD) to Long-Range $\text{CO}$
-* **Deficiency**: Long-range $\text{CO}$ models in `AirQ` hit a hard wall at 10 days because they only used internal satellite lags and static harmonics.
-* **Correction**: Ingest monthly **ONÍ (Oceanic Niño Index)** and **DMI (Dipole Mode Index)** series into `aqf_forecast/features.py`. Long-range sub-seasonal $\text{CO}$ column density over South Asia strongly correlates with monsoon-scale atmospheric circulation driven by equatorial sea-surface temperature anomalies.
-
-### Action Item 4: Implement Dual-Metric Reporting Across All Documents
-* **Deficiency**: Reviewers and faculty panels become easily confused when one slide shows $R^2 = 0.651$ and another shows Skill $= +3.1\%$.
-* **Correction**: Standardize all tables, figures, and presentation slides to display **both metrics simultaneously**:
-  * **$R^2$ (explained total variance against global mean)**: Demonstrates overall system explanatory power to academic evaluators.
-  * **Skill Score (explained anomaly variance against seasonal climatology)**: Demonstrates atmospheric forecast value to meteorological specialists.
-
-### Action Item 5: Export GeoTIFFs for the Complete Model Portfolio
-* **Deficiency**: Currently, only `AirQ` exports GeoTIFF rasters, but only for its conservative baseline/Ridge choices.
-* **Correction**: Connect our ConvGRU ST-ResUNet and Hurdle Classifier predictions to `AirQ`'s GeoTIFF export engine (`rasterio` 90-band writer in `Forecasting/src/aqf_forecast/final.py`). Generate production-ready GeoTIFFs displaying predicted mean fields and calibrated $80\%$ uncertainty intervals for the full operational portfolio.
-
----
-
-## 6. Synthesis Summary for the FYP Review Panel
-
-| Dimension | Antonio Roger's `AirQ` | Our Project (`Adarsh[PHASE-1]`) | Unified Final Recommendation |
-| :--- | :--- | :--- | :--- |
-| **Engineering & Code Quality** | **Exemplary (Production-grade `uv`, automated tests)** | Good (Research scripts & notebooks) | **Adopt `AirQ`'s repository architecture and CLI tools.** |
-| **Data Leakage Defenses** | **Exemplary (Programmatic lookahead unit tests)** | Rigorous (Target date isolation) | **Adopt `AirQ`'s unit tests as formal verification.** |
-| **Validation Methodology** | **Exemplary (Rolling-origin 2021–2023, locked 2024)** | Rigorous (Holdout test 2023–2024) | **Adopt AirQ's rolling-origin validation framework.** |
-| **Short-Term Modeling ($\text{NO}_2$)** | Moderate (Tabular Ridge, $+3.9\%$ Skill) | **Exemplary (ConvGRU ST-ResUNet, $+25.5\%$ Skill)** | **Deploy ConvGRU ST-ResUNet as the Champion.** |
-| **Short-Term Modeling ($\text{CO}$)** | Good (Tabular Ridge, $+3.8\%$ Skill) | **Exemplary (Multi-Scale Ridge, $R^2 = 0.6927$)** | **Deploy Multi-Scale Ridge as the Champion.** |
-| **$\text{SO}_2$ Strategy** | Incomplete (Defaulted to Climatology, Skill $0\%$) | **Exemplary (Two-Stage Hurdle, ROC-AUC $0.6174$)** | **Deploy Two-Stage Hurdle Classifier as the Champion.** |
-| **Long-Term Modeling (150d)** | Good (Climatology with calibrated intervals) | **Exemplary (Climatology + ENSO/IOD Teleconnections)** | **Deploy Climatology for $\text{NO}_2$ and Teleconnections for $\text{CO}$.** |
-| **GIS & Visualization Products** | **Exemplary (90-band GeoTIFFs + fan charts)** | High (Spatial maps, transect profiles, ROC curves) | **Feed champion model outputs into AirQ's GeoTIFF pipeline.** |
+**Recommended next steps**
+1. Decide between the iteration-3 and iteration-4 configs using multi-year rolling-origin validation (e.g. validate on each of 2021, 2022, 2023), not a single 73-window val year.
+2. Obtain 2025 S5P NO2 (clean test) and ERA5 (past + forecast met); redo deweathering with LightGBM and re-check the lockdown dip.
+3. Pull VIIRS, Dynamic World and Open Buildings for a real built-up measure; audit S5P processor versions or use PAL/RPRO.
+4. Add verified event studies (Sriperumbudur–Oragadam, Ennore) and a leave-one-region-out check on the TN panel.
+5. Skip CNN/ConvGRU until Level 2 clearly beats persistence on a clean test.
