@@ -37,3 +37,15 @@ training/checkpoints/*.pt
 Thumbs.db
 .vscode/
 .idea/
+
+# Cache & Large Model Checkpoints
+cache/
+**/cache/
+runs/
+**/runs/
+dcnet/cache/
+dcnet/runs/
+*.npy
+*.npz
+*.pt
+*.pth
