@@ -21,6 +21,8 @@ ENV/
 data/raw/
 data/processed/s2_composites/
 data/processed/s5p_composites/
+cache/
+**/cache/
 *.zip
 *.tar.gz
 *.tif
@@ -29,23 +31,15 @@ data/processed/s5p_composites/
 *.pth
 *.npy
 *.npz
-data/processed/*.pt
-training/checkpoints/*.pt
+
+# Runs: exclude large weights/caches but allow benchmark metrics/jsons
+runs/**/*.pt
+runs/**/*.pth
+runs/**/*.npy
+runs/**/checkpoints/
 
 # OS and Editor files
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-# Cache & Large Model Checkpoints
-cache/
-**/cache/
-runs/
-**/runs/
-dcnet/cache/
-dcnet/runs/
-*.npy
-*.npz
-*.pt
-*.pth

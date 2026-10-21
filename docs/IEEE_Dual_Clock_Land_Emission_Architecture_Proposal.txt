@@ -1,0 +1,1360 @@
+﻿DUAL-CLOCK ARCHITECTURE FOR LEARNING LAND-USE CHANGE–EMISSION RELATIONSHIPS AND MULTI-HORIZON NO2 FORECASTING
+NEXT ARCHITECTURE PROPOSAL
+
+
+======================================================================
+ABSTRACT
+======================================================================
+
+
+This proposal presents a dual-clock architecture to investigate how land transformation—such as urban expansion, road development, industrial commissioning, and changes in vegetation or bare ground—relates to local nitrogen dioxide (NO2) changes and whether this structural signal can improve multi-horizon satellite-based forecasts. The design separates slow annual land-state evolution from fast five-day atmospheric observations. It comprises four functional stages: (1) land-state and land-change feature extraction from harmonised Sentinel-2 imagery and complementary Earth-observation products; (2) meteorological normalisation of Sentinel-5P/TROPOMI NO2; (3) a two-way fixed-effects panel model that estimates within-pixel associations between land change and deweathered NO2; and (4) a short-range anomaly model fused with seasonal climatology and an estimated structural shift.
+
+
+The separation is motivated by the limited atmospheric dataset: a 12 x 12 grid at approximately 5.5 km resolution, 438 five-day windows, and about 290 training windows. The effective sample size for land-to-emission attribution is substantially smaller than the nominal pixel-window count because neighbouring pixels and temporal observations are correlated. Deep learning is therefore reserved primarily for high-resolution land-cover and change extraction, while a parsimonious statistical model is used for the low-sample attribution task. The architecture explicitly addresses satellite processor-version changes, Sentinel-2 reflectance harmonisation, meteorological confounding, temporal leakage, spatial memorisation, and uncertainty calibration. Evaluation uses spatially blocked validation, falsification tests, and a previously unused 2025 test period. Performance targets are treated as hypotheses rather than promises; a null land-change effect is an acceptable scientific result if uncertainty and the detection limit are reported.
+
+
+Index Terms—Air pollution, land-use change, Sentinel-2, Sentinel-5P, TROPOMI, meteorological normalisation, panel data, fixed effects, remote sensing, multi-horizon forecasting.
+
+
+======================================================================
+I. INTRODUCTION
+======================================================================
+
+
+A. Background and Motivation
+
+
+Satellite-derived air-pollution observations provide broad spatial coverage but are affected by atmospheric transport, meteorology, retrieval uncertainty, cloud screening, and changes in land use. Urban expansion and industrial development may alter local emission activity, while vegetation, bare ground, road networks, and built-up surfaces provide contextual information about the changing environment. A forecasting system that treats land cover as a static map cannot represent this structural evolution.
+
+
+The project objective is therefore broader than forecasting the next five-day gas map. It is to investigate whether land transformation contains a measurable local signal that explains changes in NO2 and whether that signal can improve forecasts at longer lead times.
+
+
+Land cover and urban form evolve over months to years. Atmospheric NO2 columns can vary over hours to days as a result of emissions, transport, boundary-layer dynamics, wind, precipitation, and chemistry. Combining both clocks in a single short-window sequence model risks causing the model to underweight land change because short-term cloud, illumination, and atmospheric variability can overwhelm slow structural changes. This proposal keeps the dual-clock concept but assigns each data regime to a method suited to its sample size and temporal scale.
+
+
+B. Problem Statement
+
+
+Given multi-year Sentinel-5P/TROPOMI NO2 observations, high-resolution Sentinel-2 and auxiliary land products, and meteorological covariates, the project will estimate whether within-pixel land transformation is associated with within-pixel changes in meteorologically normalised NO2. It will then test whether a land-change-derived structural component improves forecasts over seasonal climatology and existing persistence baselines for lead times from 5 to 150 days.
+
+
+The study is designed around Chennai as the primary case study. The available evidence indicates that city-wide NO2, CO, and SO2 trends were not statistically significant over 2019–2024; consequently, the primary attribution question concerns local variation rather than a uniform city-wide increase.
+
+
+C. Research Questions
+
+
+RQ1: Can meteorological normalisation expose local NO2 changes that are obscured by weather variability?
+
+
+RQ2: Does within-pixel land change predict within-pixel change in deweathered NO2 after controlling for persistent pixel characteristics and year-specific shocks?
+
+
+RQ3: Does the estimated structural shift improve long-lead NO2 forecasts, particularly in pixels with substantial land transformation?
+
+
+RQ4: Does incorporating past meteorological features improve short-range forecasts without using information that would not be available at forecast issue time?
+
+
+RQ5: Do results remain consistent under spatially blocked validation, placebo tests, lead-lag tests, and—if required—leave-one-city-out evaluation?
+
+
+D. Project Objectives
+
+
+1. Harmonise multi-year Sentinel-5P NO2 observations and document retrieval versions.
+2. Generate same-season annual land-state composites and land-change features.
+3. Aggregate 10 m land products to the approximately 5.5 km atmospheric grid.
+4. Estimate a meteorologically normalised NO2 time series.
+5. Test the land-change/NO2 relationship using a two-way fixed-effects panel model.
+6. Establish whether Chennai alone provides enough land-change variation for statistical inference.
+7. Improve short-range anomaly forecasts only when a candidate model beats a frozen baseline.
+8. Fuse seasonal climatology, a validated structural shift, and a lead-conditioned anomaly forecast.
+9. Evaluate probabilistic calibration and forecast skill using a clean 2025 test period.
+10. Document negative or null results with defensible uncertainty estimates and detection limits.
+
+
+E. Scope
+
+
+The primary land-change attribution target is NO2. CO and SO2 may retain their existing frozen forecasting models, but they are excluded from the primary local land-change attribution analysis because CO has a longer atmospheric lifetime and stronger regional mixing, while SO2 is reported to be noise-dominated at the study grid resolution.
+
+
+The initial geography is Chennai. A multi-city extension is conditional on the power assessment and is not assumed to be necessary from the outset. A daily flux-divergence emission estimate and a custom deep-learning change detector are optional extensions, not prerequisites for the core project.
+
+
+======================================================================
+II. EXISTING EVIDENCE AND DESIGN CONSTRAINTS
+======================================================================
+
+
+The following measurements and findings were recorded as of 8 October 2026 and motivate the proposed architecture.
+
+
+1. The current atmospheric grid is 12 x 12 at approximately 5.5 km resolution. The time series contains 438 five-day windows and approximately 290 training windows. This is a small dataset for training high-capacity neural models on pollutant maps.
+
+
+2. No significant 2019–2024 city-mean trend was reported for NO2, CO, or SO2. Any land-driven signal is therefore expected to be local rather than a simple city-wide trend.
+
+
+3. Damped persistence reportedly outperformed climatology at a five-day lead by approximately +6.6% skill for NO2 and +9.4% for CO. The advantage faded by about 30 days for NO2 and about five days for CO. The short-range persistence baseline must therefore remain a serious competitor.
+
+
+4. Learned long-range models did not generalise well on the 2024 test period; a reported NO2 Ridge result was approximately -4.7% skill. The 2024 period has already been used and must not be treated as an untouched final test.
+
+
+5. Static Sentinel-2 information was reported to explain some spatial differences in NO2, including a Spearman correlation of approximately -0.53 between NDVI and NO2. This does not demonstrate that temporal land change predicts temporal NO2 change. The change hypothesis remains untested.
+
+
+6. Seasonal structure can inflate raw R-squared. The main forecasting metric will therefore be skill relative to climatology, not raw R-squared alone.
+
+
+These observations argue against promising specific performance gains in advance. The study will use hypotheses and gates that determine whether a component should proceed.
+
+
+======================================================================
+III. SYSTEM OVERVIEW AND ARCHITECTURAL DECISION
+======================================================================
+
+
+A. Selected Architecture
+
+
+The project is divided into three analytical components and one fusion layer:
+
+
+C1 — Land-State and Land-Change Encoder:
+Uses annual, same-season, high-resolution Earth-observation products to estimate land fractions, embeddings, and change for each atmospheric grid cell.
+
+
+C2 — Land-to-NO2 Attribution Model:
+Uses meteorologically normalised annual or dry-season NO2 summaries and a two-way fixed-effects panel model to estimate the association between land change and NO2 change.
+
+
+C3 — Fast Anomaly Forecast Model:
+Uses historical pollutant anomalies, quality masks, neighbouring-pixel summaries, and meteorological information available at issue time to forecast short-range anomalies.
+
+
+Fusion Layer:
+Combines seasonal climatology, a validated land-change structural shift, and a lead-conditioned short-range anomaly forecast.
+
+
+B. Architectural Rationale
+
+
+Deep learning is appropriate for C1 because high-resolution Sentinel-2 imagery and annual land labels provide many spatial patches. In contrast, C2 is constrained by a small number of atmospheric grid cells and years, spatial dependence, and repeated measurements. A large end-to-end network could memorise pixel identity rather than estimate a defensible land-change effect. Fixed-effects modelling is therefore used for the central scientific claim, while neural networks remain an optional tool for high-resolution land-change extraction and, only if justified, short-range forecasting.
+
+
+ERA5 meteorology is treated as city-scale scalar features rather than a stack of nominally spatial maps on a 12 x 12 grid. ERA5 has an approximately 0.25-degree grid, around 28 km, and the study area covers only a few ERA5 cells. Feeding repeated or nearly uniform meteorological fields into a CNN would add channels without meaningful spatial detail.
+
+
+C. Architecture Diagram in Text Form
+
+
+SLOW CLOCK: ANNUAL LAND STATE
+  Sentinel-2 L2A Harmonized imagery
+  + AlphaEarth annual embeddings
+  + Dynamic World annual probabilities
+  + Open Buildings Temporal
+  + VIIRS night lights
+                |
+                v
+  Cloud masking, same-season compositing, harmonisation
+                |
+                v
+  Land-state aggregation to 12 x 12 atmospheric grid
+                |
+                v
+  C1: L[p,y] and ΔL[p,y] annual land features
+                |
+                +---------------------------------------+
+                |                                       |
+                v                                       |
+  FAST/SLOW ATTRIBUTION INPUTS                          |
+  Sentinel-5P NO2 + ERA5 meteorology                    |
+                |                                       |
+                v                                       |
+  Meteorological normalisation                          |
+                |                                       |
+                v                                       |
+  Annual/dry-season deweathered NO2, Y[p,y]             |
+                |                                       |
+                v                                       |
+  C2: Two-way fixed-effects panel model <---------------+
+                |
+                v
+  Effect estimates β, θ and structural shift B[p,y]
+                |
+                +---------------------------------------+
+                                                        |
+FAST CLOCK: FIVE-DAY ANOMALY FORECAST                   |
+  Past NO2 anomalies + quality masks                    |
+  + past ERA5 scalar features                           |
+  + optional forecast meteorology                       |
+                |                                       |
+                v                                       |
+  C3: persistence / Ridge / LightGBM / optional CNN     |
+                |                                       |
+                v                                       |
+  Predicted anomaly A_hat[p,t+h]                        |
+                |                                       |
+                +-------------------+-------------------+
+                                    |
+                                    v
+  Fusion: climatology + structural shift + g(h) * anomaly
+                                    |
+                                    v
+  Forecast NO2 maps and calibrated 10/50/90% quantiles
+
+
+D. Forecast Equation
+
+
+F[p,t+h] = Clim[p,s(t+h)] + B[p,y(t+h)] + g(h) * A_hat[p,t+h]
+
+
+where:
+
+
+F[p,t+h] is the forecast for grid cell p at future time t+h.
+Clim[p,s(t+h)] is the pixel-specific seasonal climatology for the target season.
+B[p,y(t+h)] is the land-change-derived structural shift estimated using the latest land state available at issue time.
+A_hat[p,t+h] is the predicted short-range anomaly.
+g(h) is a learned lead-dependent gate, constrained to 0 <= g(h) <= 1 and monotonic with lead time so that short-lived anomalies do not dominate long-lead forecasts.
+
+
+No future land observations may be used when issuing a forecast. For a future target year, the structural component must be calculated from the latest land state actually observed at forecast issue time, not from imagery that would only become available later.
+
+
+======================================================================
+IV. DATA SOURCES AND DATA MANAGEMENT
+======================================================================
+
+
+A. Sentinel-5P/TROPOMI NO2
+
+
+Primary variable: tropospheric NO2 column.
+
+
+Preferred source: a consistently reprocessed record such as S5P-PAL/RPRO, if available and suitable. If the operational OFFL record must be used, processor-version metadata must be recorded and version effects must be tested.
+
+
+Temporal use:
+- Five-day observations for the fast anomaly stream.
+- Annual and dry-season summaries for the land-change attribution stream.
+- Extend the record from July 2018 through 2025, subject to source availability and quality.
+
+
+The current Earth Engine export collection noted in the source plan is COPERNICUS/S5P/OFFL/L3_NO2 for daily L3 data. This daily product is an optional input for the flux-divergence stretch task; it is not required for the core five-day architecture.
+
+
+Required quality handling:
+- Preserve retrieval quality flags and valid-pixel masks.
+- Track missingness by grid cell and date.
+- Record product collection, processing version, temporal aggregation, and filtering choices.
+- Ensure that missing values are not silently converted to zero.
+- Use a consistent spatial grid and documented resampling procedure.
+
+
+B. Sentinel-2 Land Imagery
+
+
+Primary source: COPERNICUS/S2_SR_HARMONIZED.
+
+
+The project will use same-season annual composites rather than comparing arbitrary dates. A dry-season window such as January–March is a candidate, but the final window must be chosen and held constant across years. Cloud and shadow masking will use the Scene Classification Layer (SCL) and documented quality rules.
+
+
+Sentinel-2 processing baseline 04.00 introduced a reflectance offset in January 2022. Use of the harmonised collection is necessary to avoid a false step change in derived indices. The same season should be used each year to reduce phenology and monsoon-related differences that could be mistaken for land transformation.
+
+
+Candidate bands:
+- B2 (blue)
+- B3 (green)
+- B4 (red)
+- B8 (near infrared)
+- B11 (short-wave infrared)
+- B12 (short-wave infrared)
+
+
+Candidate indices:
+- NDVI: vegetation signal.
+- NDBI: built-up signal.
+- BSI: bare-soil signal.
+- MNDWI: water-related signal.
+
+
+For each index, calculate annual land-state summaries and changes relative to a documented reference year. The reference year used in the source design is 2019.
+
+
+C. Annual Earth-Observation Products
+
+
+1. Google Satellite Embedding V1 / AlphaEarth annual embeddings:
+   Annual 64-dimensional embeddings at approximately 10 m, proposed as a strong Tier 1 feature source because annual embeddings are designed to be comparable across years. Coverage, availability, and exact collection semantics must be verified before use.
+
+
+2. Dynamic World:
+   Per-scene land-cover probabilities aggregated to annual probabilities. Candidate classes include built-up, vegetation, bare ground, water, and other available classes. Dynamic World may provide labels or auxiliary features; it is not independent ground truth in every location.
+
+
+3. Open Buildings Temporal:
+   Annual building presence or height-related products, noted as covering 2016–2023 in the source plan. The project must verify spatial coverage for the study area and acknowledge that the series may not extend through 2025.
+
+
+4. VIIRS Day/Night Band:
+   Annual or monthly night-light intensity used as a complementary proxy for human activity. Night lights are not direct emission measurements and should not be interpreted as such.
+
+
+D. Meteorological Data
+
+
+Source: ERA5 single-level variables and selected pressure-level winds.
+
+
+Candidate variables:
+- 10 m zonal wind (u10).
+- 10 m meridional wind (v10).
+- Boundary-layer height (BLH).
+- 2 m temperature (t2m).
+- Total precipitation (tp).
+- Surface pressure (sp).
+- 850 hPa zonal and meridional winds, where appropriate.
+
+
+Temporal aggregation:
+- Conditions around the satellite overpass, approximately 08 UTC, where suitable.
+- Five-day summaries for the fast stream.
+- Annual or seasonal summaries only where analytically justified.
+
+
+Derived features:
+- Wind speed.
+- Wind direction represented as sine and cosine.
+- Boundary-layer height at overpass.
+- Temperature.
+- Precipitation sum.
+- Ventilation index = BLH x wind speed.
+- Count of rainy days within a window.
+
+
+ERA5 inputs are city-scale scalar features, not repeated spatial channels. Download requests should be made per year, with the geographic box padded by approximately one degree to retain upwind context. Use current CDS request parameters such as data_format/download_format rather than obsolete request fields, and confirm current service limits before execution.
+
+
+E. Spatial and Temporal Harmonisation
+
+
+All sources must be aligned to:
+- One fixed study-area boundary.
+- One documented 12 x 12 atmospheric grid.
+- A common grid-cell identifier.
+- Explicit timestamps and aggregation windows.
+- A common nodata convention and validity mask.
+
+
+For high-resolution land products, calculate area-weighted or valid-pixel-weighted summaries for each atmospheric grid cell. Store both feature values and quality/support statistics, including valid area, cloud-free observation count, and missingness.
+
+
+F. Data Versioning and Provenance
+
+
+Every data artifact should record:
+- Source and collection identifier.
+- Retrieval or processing version.
+- Acquisition dates and temporal window.
+- Spatial extent and projection.
+- Cloud/quality filters.
+- Aggregation method.
+- Nodata convention.
+- Export date and script version.
+
+
+The project should retain raw or minimally processed source exports separately from derived tables so that preprocessing decisions can be reproduced.
+
+
+======================================================================
+V. COMPONENT C1: LAND-STATE AND LAND-CHANGE ENCODER
+======================================================================
+
+
+A. Purpose
+
+
+C1 converts high-resolution imagery and auxiliary land products into annual land-state vectors for each atmospheric grid cell. Its output must represent both the current land state and change over time; a single static Sentinel-2 map is insufficient for the project objective.
+
+
+B. Tier 1: Feature-Based Land-Change Pipeline
+
+
+Tier 1 is the required first implementation because it is cheaper, easier to audit, and sufficient to test whether useful land-change variation exists.
+
+
+For each year y:
+1. Build a cloud-masked, same-season Sentinel-2 composite.
+2. Derive NDVI, NDBI, BSI, and MNDWI where supported by the available bands.
+3. Aggregate annual AlphaEarth embeddings, Dynamic World probabilities, Open Buildings Temporal features, and VIIRS features to each atmospheric grid cell.
+4. Calculate land-state vector L[p,y].
+5. Calculate change relative to the reference year, for example:
+   ΔL[p,y] = L[p,y] - L[p,2019]
+6. Preserve individual feature changes and quality metadata rather than retaining only a single scalar change score.
+
+
+Potential components of L[p,y] include:
+- Mean annual embedding dimensions.
+- Built-up fraction or probability.
+- Vegetation fraction or probability.
+- Bare-ground fraction or probability.
+- Water fraction or probability.
+- Building-presence/height summary, where available.
+- Night-light intensity.
+- Physical index summaries and their changes.
+
+
+The final feature list must be fixed before evaluating the attribution model. Highly correlated features should be reviewed to avoid unstable coefficient estimates.
+
+
+C. Tier 2: Optional Siamese U-Net
+
+
+Tier 2 is the custom deep-learning contribution and should be attempted only after Tier 1 has produced a functioning baseline.
+
+
+Input:
+- Bi-temporal same-season Sentinel-2 patches.
+- Bands B2, B3, B4, B8, B11, and B12.
+- Derived spectral indices where useful.
+- Patch sizes of 64 x 64 or 128 x 128 pixels at 10 m, as proposed in the source design.
+
+
+Model:
+- A Siamese U-Net or related bi-temporal encoder-decoder.
+- Shared or comparable encoders for the two dates.
+- A change representation built from the two encoded dates.
+- Outputs for built-up, vegetation, bare-ground, or other selected land-change classes.
+
+
+Training labels:
+- Dynamic World annual probabilities and/or Open Buildings Temporal change labels.
+- Labels must be treated as imperfect proxies, not error-free ground truth.
+- Any label-year mismatch must be documented.
+
+
+Optional initialisation:
+- An Earth-observation foundation model such as SSL4EO-S12 ResNet or Prithvi-EO-2.0 may be evaluated against training from scratch. Model choice must be justified by data access, licensing, compute, and measurable validation performance.
+
+
+Evaluation:
+- Hold out spatial blocks that are not represented in training patches.
+- Report per-class precision, recall, F1, change-F1, and Cohen's kappa where appropriate.
+- Avoid random patch splitting that allows adjacent or overlapping patches to leak across train and test sets.
+
+
+Output:
+- Annual land fractions per atmospheric grid cell.
+- Percentage built-up, vegetation, and bare ground.
+- Newly built-up fraction since the reference year.
+- Quality or confidence information where available.
+
+
+C1 is independently useful even if C2 finds no statistically detectable relationship between land change and NO2.
+
+
+D. Change-Power Assessment
+
+
+Before fitting the attribution model, plot and tabulate the distribution of ΔL across pixels and years. Define the threshold for a meaningful built-up change based on product uncertainty and a predeclared operational rule, not a threshold selected after inspecting the desired result.
+
+
+Gate G1:
+If fewer than approximately ten Chennai grid cells show meaningful land change, expand the panel to four to six additional Indian cities with different growth patterns, subject to comparable data quality. Candidate cities in the source plan are Bengaluru, Hyderabad, Pune, Ahmedabad, and Kolkata. Chennai remains the principal case study and forecast target.
+
+
+======================================================================
+VI. COMPONENT C2: METEOROLOGICAL NORMALISATION AND LAND-TO-NO2 ATTRIBUTION
+======================================================================
+
+
+A. Purpose and Interpretation
+
+
+C2 is the primary scientific component. It estimates whether within-pixel land change is associated with within-pixel changes in deweathered NO2 after accounting for stable pixel characteristics and common year-specific shocks.
+
+
+The model does not automatically establish causality. Fixed effects and falsification tests improve credibility, but unmeasured local changes, measurement errors, atmospheric transport, and residual confounding may remain. Results should be described as associations unless the identification assumptions are convincingly defended.
+
+
+B. Meteorological Normalisation
+
+
+Goal:
+Estimate a weather-normalised NO2 series that is less sensitive to differences in meteorological conditions across observation windows.
+
+
+Proposed model:
+NO2[p,t] ~ ERA5[t] + day-of-year + time index
+
+
+A LightGBM model may be fitted per pixel or pooled with pixel identity as a categorical feature. The model should be simple enough to validate against available sample size and should not be allowed to memorise time or location in a way that creates artificial residual trends.
+
+
+Normalisation procedure:
+1. Fit the meteorological model using training data only for any forecast-related evaluation.
+2. Resample or otherwise standardise ERA5 conditions from the same season across years.
+3. Predict NO2 repeatedly under the standardised meteorological distribution.
+4. Average the predictions to obtain NO2_dw[p,t], the meteorologically normalised estimate.
+5. Aggregate the normalised series into annual and dry-season means Y[p,y].
+6. Compare raw and normalised series, including the 2020 lockdown period, while recognising that lockdown-related changes are not a complete validation by themselves.
+
+
+A key diagnostic in the source plan is whether the 2020 lockdown dip becomes clearer after normalisation. If it does not, the normalisation procedure must be inspected; this diagnostic alone is not proof that the method is correct.
+
+
+C. Attribution Model
+
+
+The proposed two-way fixed-effects panel equation is:
+
+
+Y[p,y] = α_p + γ_y + β * ΔL[p,y] + θ * WΔL[p,y] + δ * NTL[p,y] + ε[p,y]
+
+
+where:
+- Y[p,y] is the annual or dry-season deweathered NO2 mean for pixel p and year y.
+- α_p is the pixel fixed effect.
+- γ_y is the year fixed effect.
+- ΔL[p,y] is the land-change feature or predeclared feature set.
+- WΔL[p,y] is a spatial-neighbour summary of land change.
+- NTL[p,y] is the night-light activity proxy.
+- β and θ are coefficients of interest.
+- δ is the night-light coefficient.
+- ε[p,y] is the residual.
+
+
+Pixel fixed effects control for time-invariant pixel properties such as persistent greenness, coastal position, and longstanding industrial geography. Year fixed effects control for common year-specific shocks, including city-wide changes and some common retrieval shifts. These controls do not automatically remove pixel-specific retrieval effects or all processor-version confounding; consistent reprocessing or explicit version controls remain necessary.
+
+
+The neighbour term represents a spatial lag or ring summary because NO2 observed in a cell may be influenced by nearby emission sources and transport. The neighbourhood definition must be fixed in advance, documented, and tested for sensitivity.
+
+
+D. Statistical Inference
+
+
+The nominal count of pixel-year observations must not be mistaken for the effective sample size. Spatial and temporal dependence can make naive standard errors much too small.
+
+
+Required inference:
+- Cluster standard errors by spatial block where the number of clusters supports it.
+- Prefer a spatial-block bootstrap for confidence intervals when feasible.
+- Report coefficient estimates, confidence intervals, sample counts, missingness, and the number of pixels with meaningful change.
+- Report sensitivity to feature definitions and the spatial-neighbour specification.
+- Avoid presenting a small p-value as sufficient evidence without effect size and robustness checks.
+
+
+A non-linear LightGBM model may be used as a secondary check on the same within-transformed variables, with SHAP used for interpretation. Its estimated direction should be compared with the linear fixed-effects result. Agreement is supporting evidence, not proof of causality.
+
+
+E. Falsification and Robustness Tests
+
+
+1. Placebo test:
+   Shuffle land-change values between pixels under a scheme that preserves relevant distributions. The apparent land-change coefficient should disappear or substantially weaken. The shuffling procedure must be specified to avoid an invalid null.
+
+
+2. Lead-lag test:
+   Test whether future land change predicts past deweathered NO2. A strong apparent relationship in the wrong temporal direction indicates confounding, leakage, or shared trends.
+
+
+3. Event studies:
+   Select two to four locations with documented change dates within or near the study region. Candidate areas noted in the source plan include the Sriperumbudur–Oragadam industrial/logistics belt and North Chennai/Ennore power or port expansion. Verify dates and evidence from public sources before selecting events. Compare deweathered NO2 before and after the change with matched stable pixels.
+
+
+4. Power assessment:
+   Report the distribution of land-change values and the number of pixels exceeding the predefined meaningful-change threshold before model fitting.
+
+
+5. Processor-version sensitivity:
+   Repeat the analysis using consistently reprocessed data or explicit retrieval-version controls. Show whether the sign and magnitude are robust.
+
+
+6. Lockdown sensitivity:
+   Repeat the analysis with and without 2020 Q2, as specified in the evaluation plan.
+
+
+7. Alternative land features:
+   Compare a small predeclared feature set and avoid searching dozens of variants until a significant result appears.
+
+
+F. Gate G2
+
+
+If the estimated land-change effect is sufficiently stable, interpretable, and supported by robustness checks, the estimated structural component may be used in forecast fusion.
+
+
+If the effect is not detected or is inconsistent:
+- Set the land-change structural component B to zero in the main forecast.
+- Report the confidence interval and the study's detection limit.
+- Do not tune the model to manufacture a positive effect.
+- Preserve the land-change extraction results as an independent contribution.
+
+
+G. Optional Multi-City Panel
+
+
+If Gate G1 identifies inadequate land-change variation in Chennai, extend the attribution dataset to four to six additional cities, using the same preprocessing and grid definition principles. Use leave-one-city-out evaluation to assess whether the relationship generalises beyond the city used for fitting.
+
+
+The multi-city design is intended to increase independent variation, not merely to multiply highly correlated pixels. Differences in sensor coverage, urban form, climate, and data quality must be documented. Chennai remains the primary case study and forecast target.
+
+
+======================================================================
+VII. COMPONENT C3: SHORT-RANGE ANOMALY FORECASTING
+======================================================================
+
+
+A. Purpose
+
+
+C3 predicts short-lived deviations from the seasonal baseline. It is not expected to independently learn multi-year land transformation from short windows. It uses the fast clock and is evaluated against strong, simple baselines before any deep-learning model is attempted.
+
+
+B. Baseline Ladder
+
+
+Level 0 — Seasonal Climatology:
+A reference forecast based on historical pixel- and season-specific means or another explicitly defined climatology.
+
+
+Level 1 — Damped Persistence:
+The current frozen champion. It forecasts the anomaly using a decaying persistence assumption. This baseline must be retained unless a replacement is shown to be better on validation and the clean test.
+
+
+Level 2 — Ridge or LightGBM:
+Candidate inputs include:
+- Past NO2 anomalies and lags.
+- Three-by-three neighbouring-pixel mean or other fixed neighbourhood summaries.
+- City-mean anomaly.
+- Observation masks and missingness indicators.
+- Past ERA5 scalar features.
+- Latest observed land state L[p,y].
+- Lead time and seasonal features, where appropriate.
+
+
+Level 3 — Small U-Net or ConvGRU with FiLM:
+Use only if Level 2 improves over damped persistence. Inputs may include anomaly maps and quality masks as channels, with ERA5 scalar features and forecast lead incorporated through Feature-wise Linear Modulation (FiLM). Annual land features may be included as slow-changing contextual inputs.
+
+
+If the CNN is attempted, daily L3 NO2 maps may provide approximately five times as many temporal samples as five-day composites, subject to product quality and a clear mapping from daily inputs to the five-day target. Without the extra data, a deep model may simply tie the tabular baseline.
+
+
+C. Meteorology Availability Modes
+
+
+Two distinct modes must be reported:
+
+
+Mode A — Attribution/Deweathering:
+Concurrent ERA5 can be used to estimate how weather explains observed NO2. This is a retrospective analysis, not a deployable forecast.
+
+
+Mode B — Operational Forecast:
+Only meteorological information available at the forecast issue time may be used. This means past ERA5 observations and, if available, genuine forecast meteorology such as ECMWF forecasts. Concurrent ERA5 from the target window must not be included.
+
+
+If ECMWF medium-range forecasts can be obtained consistently for the evaluation period, evaluate a separate forecast-met variant. Report it separately from the past-only model.
+
+
+D. Training and Loss
+
+
+The primary probabilistic objective is masked quantile pinball loss for the 10th, 50th, and 90th percentiles. This matches the desired uncertainty-band output and avoids an incorrectly specified likelihood.
+
+
+Only valid observations contribute to the masked loss. All-invalid or all-cloud batches must be handled explicitly and safely. Additional loss terms should not be introduced unless an ablation demonstrates a measurable gain. Avoid hand-setting numerous lead weights on a small dataset.
+
+
+E. Model Selection Rule
+
+
+Move from one level to the next only when the candidate improves the predeclared validation metric and retains the improvement on the clean test. The 2023 validation period is part of model selection; the final 2025 test is used once after the pipeline is frozen.
+
+
+======================================================================
+VIII. FUSION, MULTI-HORIZON FORECASTS, AND UNCERTAINTY
+======================================================================
+
+
+A. Fusion Logic
+
+
+The final forecast is:
+
+
+F[p,t+h] = Clim[p,s(t+h)] + B[p,y(t+h)] + g(h) * A_hat[p,t+h]
+
+
+The structural component is:
+
+
+B[p,y] = beta_hat * ΔL[p,y] + theta_hat * WΔL[p,y]
+
+
+The exact features used in B must match the accepted C2 model. If C2 fails Gate G2, B is set to zero for the primary forecast and the static-climatology ablation is retained.
+
+
+B. Lead-Conditioned Gate
+
+
+The gate g(h) is learned using validation data and constrained to remain between zero and one. It should be monotonic with lead time so that the fast anomaly component fades as the forecast horizon increases. The gate must not be hand-tuned to make the final graph appear better.
+
+
+C. Forecast Horizons
+
+
+Evaluate the following lead times:
+- 5 days
+- 10 days
+- 20 days
+- 30 days
+- 60 days
+- 120 days
+- 150 days
+
+
+The source plan describes horizons as one to thirty five-day windows. The implementation must make the mapping between lead days and forecast windows explicit and consistent.
+
+
+D. Probabilistic Output
+
+
+Produce the 10th, 50th, and 90th percentile forecasts for each lead, providing an 80% prediction interval. Evaluate empirical interval coverage and interval sharpness. An 80% nominal interval should achieve coverage near 80% over a sufficiently large and representative evaluation set; deviations must be reported rather than concealed.
+
+
+E. No Future-Land Leakage
+
+
+For every forecast origin, use only the latest land state that would have been available at that date. Do not use future annual composites or future building layers to calculate B. If annual land products are published with a delay, the assumed operational availability date must reflect that delay.
+
+
+======================================================================
+IX. ALTERNATIVES CONSIDERED
+======================================================================
+
+
+A. Option A: End-to-End Dual-Branch Neural Network
+
+
+Description:
+A single architecture with separate land and pollutant encoders, cross-attention, multiple losses, and learned fusion.
+
+
+Advantages:
+- One unified model.
+- Superficially direct alignment with the dual-clock concept.
+- Potentially flexible representation learning if sufficient labelled data become available.
+
+
+Disadvantages:
+- High complexity relative to approximately 290 training maps.
+- The land-to-NO2 link has an effective sample size closer to tens than thousands.
+- Pixel identity can be encoded in unique land signatures and convolutional boundary effects.
+- The land effect is buried in latent features and difficult to express as an interpretable effect size.
+- The proposed cosine embedding-attribution loss can collapse without a contrastive objective or negative examples.
+- The proposed advection-gradient penalty is not a valid continuity constraint and is omitted.
+- Concurrent ERA5 can leak target-window information into a forecast.
+- Multiple hand-weighted losses increase overfitting risk.
+
+
+Decision:
+Rejected as the primary architecture. Selected components may be evaluated as limited ablations only when there is a clear hypothesis.
+
+
+B. Option B: Separate Land Extraction, Panel Attribution, and Forecast Fusion
+
+
+Description:
+Deep learning or pretrained features are used for high-resolution land change; statistical panel modelling estimates the land-change/NO2 association; a separate anomaly model handles short-term forecasting; a transparent fusion equation combines the components.
+
+
+Advantages:
+- Matches model complexity to the amount and type of data.
+- Tests the central scientific claim directly.
+- Supports interpretable effect estimates and uncertainty.
+- Allows each component to be evaluated independently.
+- Makes negative findings scientifically meaningful.
+- Supports clean ablations and explicit data-leakage controls.
+
+
+Disadvantages:
+- Requires substantial preprocessing and data-version auditing.
+- Depends on usable multi-year NO2 and land-change data.
+- The estimated effect may be small or not detectable.
+- It is less visually unified than one end-to-end neural network.
+
+
+Decision:
+Selected.
+
+
+C. Option C: Static Sentinel-2 Features Plus ERA5
+
+
+Description:
+Keep Sentinel-2 fixed as a spatial map and add meteorological features to the short-range model.
+
+
+Advantages:
+- Low implementation complexity.
+- Potentially useful as a short-range baseline.
+
+
+Disadvantages:
+- Does not test whether land transformation predicts emission shifts.
+- Cannot replace the primary architecture.
+
+
+Decision:
+Retain as an ablation baseline, not as the main solution.
+
+
+======================================================================
+X. RESEARCH HYPOTHESES
+======================================================================
+
+
+All forecast-skill hypotheses use skill relative to climatology unless explicitly stated. Expected outcomes are plausible hypotheses, not promised results.
+
+
+H1 — Meteorological Normalisation:
+Normalisation will expose local NO2 change that is partly obscured by weather. Test using raw versus normalised annual pixel means, variability, and the visibility of the 2020 lockdown dip. A clearer lockdown dip is a diagnostic, not sufficient validation by itself.
+
+
+H2 — Land-Change Association:
+Within-pixel land change will predict within-pixel deweathered NO2 change, with a positive association expected for new built-up or industrial change in relevant locations. Test using the fixed-effects panel, confidence intervals, placebo and lead-lag tests, and event studies. The result is uncertain and may be null in Chennai alone.
+
+
+H3 — Long-Lead Structural Improvement:
+The structural shift B will improve forecasts at 60–150 days relative to static climatology, particularly in the highest land-change tercile. A city-wide gain may be near zero; any positive gain may be concentrated in highly changed pixels and depends on H2.
+
+
+H4 — Past Meteorology:
+Adding past ERA5 features will improve five-day NO2 skill over the existing damped-persistence baseline. The expected gain is modest and must be measured.
+
+
+H5 — Forecast Meteorology:
+A variant using genuine forecast meteorology will improve five- to ten-day forecasts if suitable historical forecast data can be obtained. This is conditional on data availability.
+
+
+A null H2 is an acceptable thesis outcome. A defensible result may be that land-change effects at approximately 5.5 km resolution over the available time span are below the detection limit after controlling for weather and year shocks.
+
+
+======================================================================
+XI. EVALUATION AND VALIDATION PROTOCOL
+======================================================================
+
+
+A. Temporal Splits
+
+
+Training: July 2018 through 2022, subject to actual data coverage.
+Validation: 2023–2024.
+Final test: 2025.
+
+
+Because 2024 has already been used in prior experiments, it is not an untouched test set. Model choices, thresholds, and gates must be frozen before the final 2025 evaluation. After model selection, retrain on training plus validation data only as specified in the protocol, then score 2025 once.
+
+
+B. C1 Land-Change Evaluation
+
+
+Use spatial-block holdouts. Report:
+- Per-class precision and recall.
+- Per-class F1.
+- Change-F1.
+- Cohen's kappa where appropriate.
+- Confusion matrices.
+- Performance by land-cover class and spatial block.
+- Sensitivity to cloud masking and label quality.
+
+
+C. C2 Attribution Evaluation
+
+
+Report:
+- Fixed-effects coefficient estimates.
+- Confidence intervals from spatial-block bootstrap or an appropriate spatially robust procedure.
+- Number of pixels and pixel-years used.
+- Missing-data patterns.
+- Land-change distribution and meaningful-change pixel count.
+- Placebo and lead-lag results.
+- Event-study plots for verified events.
+- Sensitivity to processor-version controls and exclusion of 2020 Q2.
+- Results from the optional nonlinear model, if performed.
+- Multi-city leave-one-city-out results, if the extension is triggered.
+
+
+D. C3 and Fusion Evaluation
+
+
+Primary metrics:
+- Skill relative to climatology at each lead.
+- Comparison with damped persistence.
+- CRPS for probabilistic predictions where implemented.
+- Empirical coverage of the nominal 80% prediction interval.
+- Interval width or sharpness.
+- Error and skill by season, including monsoon and dry-season periods.
+- Error and skill stratified by land-change tercile.
+- Spatial summaries and per-pixel distributions, not only city-wide averages.
+
+
+E. Skill Definition
+
+
+Use one explicit definition consistently. For a loss metric L, a standard skill score may be reported as:
+
+
+Skill = 1 - L_model / L_reference
+
+
+where the reference is climatology for the primary skill score. The report must state the exact loss function and aggregation method. Positive skill means the model improves on the chosen reference under this definition; negative skill means it performs worse. Report damped persistence as a separate baseline so the reader can distinguish improvement over climatology from improvement over the strongest existing model.
+
+
+F. Required Ablations
+
+
+1. Static Sentinel-2 features versus explicit land-change features.
+2. With versus without ERA5 features.
+3. With versus without structural shift B.
+4. Retrieval-version flag/control on versus off, where applicable.
+5. Full period versus exclusion of 2020 Q2.
+6. Tabular model versus optional CNN/ConvGRU.
+7. Past-only meteorology versus genuine forecast meteorology, if available.
+8. Tier 1 land features versus Tier 2 learned change detector, if Tier 2 is completed.
+
+
+G. Spatial Generalisation
+
+
+Do not assume that convolutional translation equivariance prevents memorisation. Zero padding, unique land signatures, and fixed geography can still encode position. Use spatial-block cross-validation. If a multi-city panel is built, use leave-one-city-out evaluation as the stronger test of generalisation.
+
+
+======================================================================
+XII. DATA LEAKAGE, CONFOUNDERS, AND FAILURE CONTROLS
+======================================================================
+
+
+A. TROPOMI Processor-Version Changes
+
+
+Operational OFFL records may mix processor versions. The source plan notes changes between v1.4 and v2.x, including changes in tropospheric columns that can vary with pollution and cloud conditions. If these changes coincide with urban land patterns, they may produce an artificial temporal association.
+
+
+Mitigation:
+- Prefer a consistently reprocessed S5P-PAL/RPRO record if suitable and available.
+- Otherwise retain processor-version metadata and include sensitivity analyses.
+- Audit the exact versions represented in existing Google Earth Engine exports before modelling.
+- Document residual limitations if a consistent reprocessed record cannot be obtained.
+
+
+B. Sentinel-2 Processing Baseline
+
+
+Sentinel-2 baseline 04.00 introduced a reflectance offset in January 2022. Use COPERNICUS/S2_SR_HARMONIZED and same-season annual composites to reduce false change caused by processing and phenology.
+
+
+C. Forecast-Time Meteorology Leakage
+
+
+Concurrent ERA5 is acceptable for retrospective deweathering and attribution, but not as an input to an operational forecast when the target-window weather is not yet known. The forecasting pipeline must use only past observations or archived forecast products available at the issue time.
+
+
+D. Spatial Leakage
+
+
+Randomly splitting adjacent image patches can allow near-duplicate geography into both training and validation sets. Use spatial blocks for C1 and spatially robust inference for C2. Report the spatial split design.
+
+
+E. Temporal Leakage
+
+
+All scalers, imputation rules, feature selection, thresholds, and hyperparameter choices must be fit using training/validation data only. The 2025 test set must not be used to choose features, model architecture, or thresholds.
+
+
+F. Missing Data and Cloud Masks
+
+
+Do not replace missing pollutant observations with zero. Keep quality masks and missingness indicators. Ensure all-invalid batches are handled correctly. Report data coverage and avoid evaluating only the easiest clear-sky periods without noting the selection effect.
+
+
+G. Invalid or Unsupported Losses
+
+
+Do not use the proposed advection-gradient penalty as if it were a continuity equation. Do not use a cosine embedding-attribution loss without a learning objective that prevents representational collapse. Use masked quantile pinball loss for the primary probabilistic forecast, and add extra terms only after a successful ablation.
+
+
+======================================================================
+XIII. OPTIONAL EXTENSION: FLUX-DIVERGENCE EMISSION ESTIMATION
+======================================================================
+
+
+This extension is not part of the minimum viable system. It should be considered only if the core attribution pipeline shows a useful signal and daily NO2 data and winds are adequate.
+
+
+The motivation is that satellite NO2 columns are influenced by atmospheric transport and are not direct, local emission measurements. A flux-divergence approach can use daily L3 NO2 and wind fields to estimate an emission-related quantity. The source plan gives the conceptual expression:
+
+
+E approximately equals divergence of (V times u) plus V divided by tau.
+
+
+This expression is a project note, not a complete implementation specification. The exact formulation, units, assumptions, chemical lifetime, wind treatment, spatial derivatives, uncertainty, and references must be verified against the cited Beirle et al. literature before implementation.
+
+
+The flux-divergence method should be applied to daily data, not inserted as an unverified CNN loss term on five-day composites. It should be documented as an independent extension with its own assumptions and validation.
+
+
+======================================================================
+XIV. IMPLEMENTATION PLAN AND DECISION GATES
+======================================================================
+
+
+Phase 1 — Data Audit and Harmonisation
+Tasks:
+- Inspect current Sentinel-5P exports and record processor versions.
+- Obtain consistent PAL/RPRO NO2 if possible; otherwise document and flag versions.
+- Build harmonised, same-season Sentinel-2 composites for 2019–2025, subject to coverage.
+- Obtain ERA5 data year by year with a padded geographic box.
+- Acquire AlphaEarth annual embeddings, Dynamic World annual probabilities, Open Buildings Temporal, and VIIRS features where coverage permits.
+- Obtain the 2025 NO2 test observations.
+- Align all data to the same 12 x 12 grid and document masks, units, nodata, and source versions.
+
+
+Exit criterion:
+All required data layers are aligned to the atmospheric grid, and source versions and temporal coverage are documented.
+
+
+Gate G1 — Land-Change Power
+Tasks:
+- Plot the distribution of ΔL by feature, pixel, and year.
+- Count pixels with meaningful built-up or other predeclared change.
+- Check uncertainty and missingness in land labels.
+Decision:
+If fewer than approximately ten pixels exhibit meaningful change, expand to additional cities before attempting a definitive C2 attribution analysis.
+
+
+Phase 2 — Meteorological Normalisation
+Tasks:
+- Fit the LightGBM normalisation model per pixel or pooled with a pixel identifier.
+- Generate standardised-weather predictions.
+- Aggregate to annual and dry-season Y[p,y].
+- Compare raw and normalised series and inspect the lockdown period.
+
+
+Exit criterion:
+Normalisation diagnostics are reviewed and the method is frozen before attribution analysis. A clearer lockdown dip is one diagnostic, not the sole acceptance condition.
+
+
+Phase 3 — C1 Land-Change Features
+Tasks:
+- Implement Tier 1 annual features first.
+- Aggregate features and changes to each atmospheric grid cell.
+- Evaluate coverage, stability, and spatial patterns.
+- Implement the Siamese U-Net only if time and resources permit.
+
+
+Exit criterion:
+Tier 1 features are available for the required years. If Tier 2 is performed, spatial-block metrics are reported.
+
+
+Phase 4 — C2 Attribution
+Tasks:
+- Fit the two-way fixed-effects panel.
+- Include the predeclared neighbour-change and night-light terms.
+- Calculate spatially robust confidence intervals.
+- Perform placebo, lead-lag, event-study, processor-version, and lockdown sensitivity checks.
+- Report effect sizes, confidence intervals, and the effective sample limitations.
+
+
+Exit criterion:
+The coefficient estimate and uncertainty are reported, and the falsification tests are complete.
+
+
+Gate G2 — Structural Shift Acceptance
+Decision:
+If the effect is sufficiently stable and supported by robustness checks, use the accepted estimate in B.
+If not, set B = 0 in the primary forecast and report the detection limit.
+
+
+Phase 5 — C3 Short-Range Forecasting
+Tasks:
+- Establish climatology and damped-persistence baselines.
+- Train Ridge/LightGBM using historical anomalies, masks, neighbourhood features, and past ERA5 scalars.
+- Attempt the small U-Net/ConvGRU only if Level 2 improves over damped persistence.
+- Keep forecast-meteorology experiments separate from past-only experiments.
+
+
+Exit criterion:
+The selected model beats the lower-level baseline on validation and retains the improvement on the clean 2025 test.
+
+
+Phase 6 — Fusion and Probabilistic Forecasts
+Tasks:
+- Combine climatology, accepted B, and predicted anomaly.
+- Learn g(h) on validation with monotonic constraints.
+- Produce 10th, 50th, and 90th percentile predictions.
+- Evaluate skill, CRPS, interval coverage, seasonal performance, and land-change terciles.
+
+
+Exit criterion:
+Forecast results are reported at all specified horizons, with uncertainty calibration and baseline comparisons.
+
+
+Phase 7 — Final Analysis and Reporting
+Tasks:
+- Freeze the pipeline and retrain according to the split protocol.
+- Evaluate 2025 once.
+- Generate architecture diagrams, data-quality summaries, land-change maps, coefficient plots, placebo and event-study figures, skill-versus-lead curves, and uncertainty calibration plots.
+- Report all null results, failed models, and ablations needed to interpret the findings.
+
+
+Exit criterion:
+A reproducible report is completed with a clear distinction between measured results, hypotheses, and limitations.
+
+
+Recommended order if time is limited:
+Phase 1 -> G1 -> Phase 2 -> Phase 4 -> Phase 3 Tier 1 -> Phase 5 -> Phase 6.
+Tier 2 deep-learning change detection is the first optional task to defer and the first to restore if time permits.
+
+
+======================================================================
+XV. SOFTWARE AND REPRODUCIBILITY REQUIREMENTS
+======================================================================
+
+
+The source proposal specifies algorithms and data collections but does not prescribe a complete software stack. The implementation should therefore select tools based on the existing project environment and record the versions used. A reasonable implementation may use Python for data processing and modelling, Google Earth Engine for satellite preprocessing where appropriate, and established geospatial, statistical, and machine-learning libraries. These are implementation recommendations, not fixed requirements from the source design.
+
+
+Minimum reproducibility requirements:
+1. Version-control all preprocessing and modelling scripts.
+2. Store configuration separately from code.
+3. Fix random seeds where relevant and record nondeterministic components.
+4. Save train/validation/test date boundaries and spatial-block assignments.
+5. Preserve the raw-to-derived data lineage.
+6. Record software and model versions.
+7. Store model parameters and training metadata.
+8. Generate evaluation metrics from scripts rather than manual spreadsheet calculations.
+9. Retain baseline results and ablations.
+10. Ensure the final 2025 test is not repeatedly used for model selection.
+
+
+Suggested logical modules:
+- data_ingestion/
+- quality_control/
+- sentinel2_composites/
+- land_features/
+- meteorology/
+- deweathering/
+- panel_attribution/
+- anomaly_forecasting/
+- fusion/
+- evaluation/
+- reporting/
+- configs/
+- tests/
+
+
+This directory structure is illustrative and may be adapted to the repository.
+
+
+======================================================================
+XVI. EXPECTED DELIVERABLES
+======================================================================
+
+
+1. Harmonised Sentinel-5P NO2 dataset with documented processor versions and quality masks.
+2. Same-season annual Sentinel-2 composites and derived spectral indices.
+3. Annual land-state and land-change feature table on the 12 x 12 atmospheric grid.
+4. Data-quality and change-power assessment for Gate G1.
+5. Meteorologically normalised NO2 time series and annual/dry-season summaries.
+6. Fixed-effects attribution results with spatially robust uncertainty and falsification tests.
+7. Optional spatially validated Siamese U-Net land-change model.
+8. Short-range anomaly model with climatology and damped-persistence comparisons.
+9. Fused forecasts at 5, 10, 20, 30, 60, 120, and 150 days.
+10. Quantile prediction intervals and coverage evaluation.
+11. Ablation study and clean 2025 test results.
+12. Final technical report with architecture, data lineage, limitations, and reproducible figures.
+
+
+======================================================================
+XVII. RISKS, LIMITATIONS, AND MITIGATION
+======================================================================
+
+
+Risk 1 — Insufficient land change in Chennai:
+Mitigation: conduct Gate G1 before fitting C2; expand to additional cities if required.
+
+
+Risk 2 — NO2 retrieval-version artefacts:
+Mitigation: use consistently reprocessed data or explicit version controls and sensitivity analyses.
+
+
+Risk 3 — Sentinel-2 processing discontinuity:
+Mitigation: use S2_SR_HARMONIZED and same-season composites.
+
+
+Risk 4 — Weather confounding:
+Mitigation: meteorological normalisation, year and pixel fixed effects, and explicit forecast-time feature restrictions.
+
+
+Risk 5 — Spatial dependence creates overconfident statistics:
+Mitigation: spatial-block bootstrap or suitable clustered inference and spatial holdouts.
+
+
+Risk 6 — Pixel identity memorisation:
+Mitigation: avoid unsupported claims that convolutional layers prevent memorisation; use spatial-block validation and, if multi-city, leave-one-city-out evaluation.
+
+
+Risk 7 — Long-range skill does not improve:
+Mitigation: treat improvement as a hypothesis; retain climatology and persistence baselines; report the result honestly.
+
+
+Risk 8 — Land-change features are noisy or label-biased:
+Mitigation: compare complementary sources, preserve uncertainty and coverage statistics, and avoid treating proxy labels as ground truth.
+
+
+Risk 9 — Deep learning consumes time without adding value:
+Mitigation: complete Tier 1 features and statistical attribution first; only add Tier 2 or C3 neural models when lower-complexity models justify the added complexity.
+
+
+Risk 10 — Forecast uncertainty is miscalibrated:
+Mitigation: use quantile loss, evaluate nominal 80% interval coverage, and report deviations by lead and season.
+
+
+======================================================================
+XVIII. EXPECTED CONTRIBUTIONS
+======================================================================
+
+
+The project is expected to contribute:
+
+
+1. A dual-clock design that explicitly separates annual land transformation from short-term atmospheric anomalies.
+2. A reproducible procedure for extracting annual land-change features and aggregating them to a satellite atmospheric grid.
+3. A statistically interpretable test of the land-change/NO2 relationship using meteorological normalisation and two-way fixed effects.
+4. A controlled comparison of static land context and dynamic land-change features.
+5. A forecast-fusion method that allows structural shifts to affect long-lead predictions while fast anomalies fade with lead time.
+6. A robust evaluation protocol that includes spatial validation, placebo tests, lead-lag tests, processor-version checks, and a clean final test year.
+7. A defensible null-result pathway, including uncertainty and a detection limit, rather than a requirement to obtain a positive result.
+
+
+The project should not claim causal identification solely from fixed effects or forecast improvement alone. The strength of the conclusion must match the data, assumptions, and robustness evidence.
+
+
+======================================================================
+XIX. CONCLUSION
+======================================================================
+
+
+This proposal selects a modular dual-clock architecture in which land change is measured annually, the land-to-NO2 relationship is estimated with a transparent panel model, and short-range anomalies are forecast separately before being fused with climatology and a validated structural component. The design is intentionally conservative because the atmospheric dataset is small and spatially dependent. It prioritises source harmonisation, meteorological normalisation, fixed-effects attribution, falsification tests, and leakage-safe validation over a high-capacity end-to-end network.
+
+
+The architecture succeeds scientifically if it provides a credible estimate—or a credible bound—on the relationship between land transformation and local deweathered NO2, and then determines whether that information improves forecasting. A null result is not a project failure when the study has adequate quality controls, uncertainty analysis, and a clearly reported detection limit.
+
+
+======================================================================
+REFERENCES TO VERIFY AND FORMAT IN IEEE STYLE
+======================================================================
+
+
+The source design identifies the following literature and data documentation as relevant. Full bibliographic metadata, titles, page numbers, DOIs, and URLs should be checked against the original publications and official documentation before submission. The entries below are deliberately not completed with guessed details.
+
+
+[1] Grange, Carslaw, et al., 2018, work on random-forest meteorological normalisation of air-quality time series and the rmweather approach. Verify the exact article title, author list, journal, volume, pages, and DOI.
+
+
+[2] Beirle et al., 2019, Science Advances, work on estimating NOx emissions from TROPOMI observations using flux-divergence methods. Verify exact title and bibliographic metadata.
+
+
+[3] Beirle et al., 2021, Earth System Science Data, work related to satellite-based flux-divergence emission estimates. Verify exact title and bibliographic metadata.
+
+
+[4] van Geffen et al., 2022, Atmospheric Measurement Techniques, work documenting TROPOMI NO2 version 2.2 changes. Verify exact title and bibliographic metadata.
+
+
+[5] S5P-PAL/RPRO official documentation describing reprocessed Sentinel-5P NO2 products and processor versions. Record the specific version and access date used.
+
+
+[6] Brown et al., 2022, Scientific Data, Dynamic World land-cover dataset paper. Verify exact title and bibliographic metadata.
+
+
+[7] Google Research, Open Buildings Temporal dataset documentation. Record the exact product version, coverage, and access date.
+
+
+[8] Google Research, AlphaEarth Foundations / Satellite Embedding V1 documentation. Record the exact product version and access date.
+
+
+[9] Islam et al., 2020, International Conference on Learning Representations (ICLR), work on position information encoded by convolutional networks and padding. Verify exact title and bibliographic metadata.
+
+
+[10] Copernicus Sentinel-2 Surface Reflectance Harmonized collection documentation, including processing-baseline handling.
+
+
+[11] Copernicus Sentinel-5P/TROPOMI NO2 product documentation and quality-screening recommendations.
+
+
+[12] Copernicus Climate Data Store ERA5 documentation for single-level and pressure-level variables.
+
+
+Note: The reference list is a verification checklist based on the source proposal, not a completed IEEE bibliography. Do not submit it as final until the original publication metadata has been checked.
+
+
+======================================================================
+APPENDIX A. CORE SYMBOLS
+======================================================================
+
+
+p       : Atmospheric grid-cell index.
+t       : Forecast issue time or observation time.
+h       : Forecast lead time.
+y       : Year index.
+L[p,y]  : Land-state feature vector for pixel p and year y.
+ΔL[p,y] : Land-change feature relative to the defined reference state.
+Y[p,y]  : Annual or seasonal meteorologically normalised NO2.
+α_p     : Pixel fixed effect.
+γ_y     : Year fixed effect.
+WΔL     : Neighbourhood summary of land change.
+NTL     : Night-time-light activity proxy.
+β, θ, δ : Panel-model coefficients.
+B[p,y]  : Land-change-derived structural shift.
+Clim    : Seasonal climatology.
+A_hat   : Predicted short-range anomaly.
+g(h)    : Lead-conditioned anomaly gate.
+F       : Fused NO2 forecast.
+
+
+======================================================================
+APPENDIX B. IMPLEMENTATION ACCEPTANCE CHECKLIST
+======================================================================
+
+
+[ ] NO2 product versions have been audited and documented.
+[ ] A consistent reprocessed NO2 record has been obtained, or version controls are documented.
+[ ] Sentinel-2 harmonised data are used.
+[ ] Annual composites use the same season and comparable masking.
+[ ] Nodata values are not silently replaced with zero.
+[ ] All data layers align to the same grid and cell identifiers.
+[ ] Land-change distributions have been reviewed before attribution.
+[ ] Gate G1 has been evaluated and documented.
+[ ] Meteorological normalisation has been checked and frozen.
+[ ] Fixed-effects model includes the predeclared controls.
+[ ] Spatial dependence is addressed in uncertainty estimates.
+[ ] Placebo and lead-lag tests have been completed.
+[ ] Event-study dates are verified from sources.
+[ ] Forecast inputs exclude unavailable target-window weather.
+[ ] Climatology and damped persistence baselines are retained.
+[ ] Model complexity is increased only after lower-level gains.
+[ ] Quantile prediction intervals are evaluated for coverage.
+[ ] Spatial-block validation is used where required.
+[ ] The 2025 test period is held out until the pipeline is frozen.
+[ ] Results distinguish hypotheses, measurements, and interpretation.
+[ ] Bibliographic references are verified and formatted before submission.
