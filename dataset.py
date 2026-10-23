@@ -35,14 +35,22 @@ class DCDataset(Dataset):
         s.T, s.M, s.H5, s.W5 = s.meta["T"], s.meta["M"], s.meta["H5"], s.meta["W5"]
         lo, hi = [pd.Timestamp(x) for x in cfg["splits"][split]]
         s.lo, s.hi = lo, hi
+        poll_idx = cfg.get("poll_idx", [0])
+        if isinstance(poll_idx, int): poll_idx = [poll_idx]
+        s.poll_idx = poll_idx
+        s.n_poll = len(poll_idx)
         s.origins = [i for i in range(s.T) if lo <= s.ws[i] <= hi and i >= cfg["min_origin_idx"]]
         tr_idx = [i for i in range(s.T) if s.ws[i] <= pd.Timestamp(cfg["splits"]["train"][1])]
         s.norm = norm or S5PNorm().fit(s.val, s.msk, tr_idx)
-        s.zs5 = np.stack([s.norm.fwd(s.val[:, c], c) for c in range(3)], 1).astype(np.float32) * s.msk
+        s.zs5 = np.stack([s.norm.fwd(s.val[:, c], c) for c in range(s.val.shape[1])], 1).astype(np.float32) * s.msk
         s.s2_stats = s2_stats or s._fit_s2(tr_idx)
-        z = [s.zs5[tr_idx][:, c][s.msk[tr_idx][:, c] > 0] for c in range(3)]
-        s.peak_thr = np.array([np.quantile(x, 0.9) for x in z], np.float32)
-        s.so2_thr = float(np.quantile(z[2], cfg["so2_event_q"]))
+        z = [s.zs5[tr_idx][:, c][s.msk[tr_idx][:, c] > 0] for c in s.poll_idx]
+        s.peak_thr = np.array([np.quantile(x, 0.9) if len(x) > 0 else 1.0 for x in z], np.float32)
+        if 2 in s.poll_idx:
+            so2_pos = s.poll_idx.index(2)
+            s.so2_thr = float(np.quantile(z[so2_pos], cfg.get("so2_event_q", 0.85))) if len(z[so2_pos]) > 0 else 0.0
+        else:
+            s.so2_thr = 0.0
 
         # Weather conditioning
         wx_file = os.path.join(cache, "weather_5d.npy")
@@ -94,35 +102,48 @@ class DCDataset(Dataset):
         Hp, Wp = (-(-h // 8)) * 8, (-(-w // 8)) * 8
         pad = lambda a, k=1: np.pad(a, [(0, 0)] * (a.ndim - 2) + [(0, Hp * k - a.shape[-2]), (0, Wp * k - a.shape[-1])])
         L = cfg["L"]; ids = np.arange(o - L + 1, o + 1); okid = ids >= 0; ids = np.clip(ids, 0, None)
-        fv = s.zs5[ids][..., i0:i0 + h, j0:j0 + w]; fm = s.msk[ids][..., i0:i0 + h, j0:j0 + w].astype(np.float32) * okid[:, None, None, None]
-        if s.split == "train" and cfg["mask_aug"] > 0:
+        fv = s.zs5[ids][:, s.poll_idx, i0:i0 + h, j0:j0 + w]
+        fm = s.msk[ids][:, s.poll_idx, i0:i0 + h, j0:j0 + w].astype(np.float32) * okid[:, None, None, None]
+        if s.split == "train" and cfg.get("mask_aug", 0.0) > 0:
             drop = (rng.rand(*fm.shape) < cfg["mask_aug"]); fm = fm * (~drop)
         fv = fv * fm
         t_end = s.we[o]
         use = [m for m in range(s.M) if s.me[m] <= t_end][-12:]
-        lv = np.zeros((12, 3, h, w), np.float32); lk = np.zeros((12, 3, h, w), np.float32)
+        lv = np.zeros((12, s.n_poll, h, w), np.float32); lk = np.zeros((12, s.n_poll, h, w), np.float32)
         for q, m in enumerate(use[::-1]):
-            mk = s.s5ok[m][:, i0:i0 + h, j0:j0 + w].astype(np.float32)
-            lv[q] = np.stack([s.norm.fwd(s.s5m[m][c, i0:i0 + h, j0:j0 + w], c) for c in range(3)]) * mk; lk[q] = mk
-        long_mem = np.concatenate([lv.reshape(36, h, w), lk.reshape(36, h, w)])
+            for p_i, c in enumerate(s.poll_idx):
+                mk = s.s5ok[m][c, i0:i0 + h, j0:j0 + w].astype(np.float32)
+                lv[q, p_i] = s.norm.fwd(s.s5m[m][c, i0:i0 + h, j0:j0 + w], c) * mk
+                lk[q, p_i] = mk
+        long_mem = np.concatenate([lv.reshape(12 * s.n_poll, h, w), lk.reshape(12 * s.n_poll, h, w)])
+
+        # Spatial / Historical Dropout on long_mem to prevent S2 shortcut
+        if s.split == "train" and cfg.get("long_mem_dropout", 0.0) > 0:
+            if rng.rand() < cfg["long_mem_dropout"]:
+                long_mem = np.zeros_like(long_mem)
+
         sl = (slice(i0 * 8, (i0 + h) * 8), slice(j0 * 8, (j0 + w) * 8))
         s2 = s.slow(t_end, sl, (h * 8, w * 8))
-        steps = cfg["steps"]; y = np.zeros((len(steps), 3, h, w), np.float32); ym = np.zeros_like(y)
+        steps = cfg["steps"]; y = np.zeros((len(steps), s.n_poll, h, w), np.float32); ym = np.zeros_like(y)
         for q, st in enumerate(steps):
             t = o + st
             if t < s.T and s.lo <= s.ws[t] <= s.hi:
-                y[q] = s.zs5[t][:, i0:i0 + h, j0:j0 + w]; ym[q] = s.msk[t][:, i0:i0 + h, j0:j0 + w]
-        ev = ((y[:, 2] > s.so2_thr) & (ym[:, 2] > 0)).astype(np.float32)
+                for p_i, c in enumerate(s.poll_idx):
+                    y[q, p_i] = s.zs5[t][c, i0:i0 + h, j0:j0 + w]
+                    ym[q, p_i] = s.msk[t][c, i0:i0 + h, j0:j0 + w]
+        if 2 in s.poll_idx:
+            so2_pos = s.poll_idx.index(2)
+            ev = ((y[:, so2_pos] > s.so2_thr) & (ym[:, so2_pos] > 0)).astype(np.float32)
+        else:
+            ev = np.zeros((len(steps), h, w), np.float32)
         doy = lambda ts: ts.dayofyear + ts.hour / 24.0
         d_org = doy(s.we[o]); d_tgt = np.array([(s.we[o] + pd.Timedelta(days=5 * st)).dayofyear for st in steps], np.float32)
         b = dict(fast_v=pad(fv), fast_m=pad(fm), s2_slow=pad(s2, 8), long_mem=pad(long_mem), y=pad(y), ym=pad(ym), ev=pad(ev),
                  doy_tgt=d_tgt, doy_org_sc=np.array([np.sin(2 * np.pi * d_org / 365.25), np.cos(2 * np.pi * d_org / 365.25)], np.float32),
-                 crop=np.array([i0, j0, h, w]))
+                 crop=np.array([i0, j0, h, w], dtype=np.int64))
         if s.has_weather and s.wx_feat is not None:
             b["weather"] = s.wx_feat[o].astype(np.float32)
         return {k: torch.from_numpy(np.asarray(v)) for k, v in b.items()}
 
 def collate(b):
-    out = {k: torch.stack([x[k] for x in b]) for k in b[0] if k != "crop"}
-    out["crop"] = tuple(int(v) for v in b[0]["crop"])
-    return out
+    return {k: torch.stack([x[k] for x in b]) for k in b[0]}

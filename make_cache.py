@@ -56,11 +56,37 @@ def main(a):
     s2m.flush(); s2ok.flush()
 
     # Weather 5-day window extraction
-    wx_path = a.weather if (hasattr(a, "weather") and a.weather) else os.path.join(os.path.dirname(a.s5p_dir), "..", "weather", "era5_daily.csv")
+    # Prefer era5_tn_clusters.csv for multi-cluster state-wide regional representation over Chennai-only era5_daily.csv
+    wx_clusters_path = os.path.join(os.path.dirname(a.s5p_dir), "..", "weather", "era5_tn_clusters.csv")
+    wx_default_path = os.path.join(os.path.dirname(a.s5p_dir), "..", "weather", "era5_daily.csv")
+    wx_path = a.weather if (hasattr(a, "weather") and a.weather) else (wx_clusters_path if os.path.exists(wx_clusters_path) else wx_default_path)
+
     if os.path.exists(wx_path):
         df_wx = pd.read_csv(wx_path)
         df_wx["date"] = pd.to_datetime(df_wx["date"])
         wx_cols = ["blh", "u10", "v10", "wind_speed", "tp", "t2m", "rh"]
+
+        # If multi-cluster dataset, aggregate across all regional clusters per day
+        if "cluster" in df_wx.columns:
+            print(f"Aggregating {df_wx['cluster'].nunique()} regional clusters from {wx_path}...")
+            df_wx = df_wx.groupby("date")[wx_cols].mean().reset_index()
+
+        # Handle missing 2024 blh values via causal DOY climatology imputation (strictly from training data)
+        if df_wx["blh"].isna().any():
+            nan_cnt = df_wx["blh"].isna().sum()
+            print(f"Causally imputing {nan_cnt} missing ERA5 'blh' values using DOY training climatology...")
+            tr_dates = df_wx[df_wx["date"] <= "2023-12-31"]
+            doy_clim = tr_dates.groupby(tr_dates["date"].dt.dayofyear)["blh"].mean()
+
+            for idx in df_wx[df_wx["blh"].isna()].index:
+                d = df_wx.loc[idx, "date"].dayofyear
+                if d in doy_clim and np.isfinite(doy_clim[d]):
+                    val = doy_clim[d]
+                else:
+                    nearby = doy_clim[(doy_clim.index >= d - 15) & (doy_clim.index <= d + 15)]
+                    val = nearby.mean() if len(nearby) > 0 else tr_dates["blh"].mean()
+                df_wx.loc[idx, "blh"] = val
+
         wx_5d = np.zeros((T, len(wx_cols) + 1), np.float32)
         for i, w in enumerate(W):
             w_end = w + dt.timedelta(days=5)
@@ -69,8 +95,19 @@ def main(a):
                 vals = sub[wx_cols].mean().values
                 vent = vals[0] * vals[3]
                 wx_5d[i] = np.append(vals, vent)
+
+        # Final check: ensure 0 NaNs remain
+        if np.isnan(wx_5d).any():
+            col_means = np.nanmean(wx_5d, axis=0)
+            nan_rows = np.where(np.isnan(wx_5d).any(axis=1))[0]
+            print(f"Warning: Imputing {len(nan_rows)} windows with remaining NaNs.")
+            for r in nan_rows:
+                for c_i in range(wx_5d.shape[1]):
+                    if np.isnan(wx_5d[r, c_i]):
+                        wx_5d[r, c_i] = col_means[c_i]
+
         np.save(os.path.join(a.out, "weather_5d.npy"), wx_5d)
-        print("weather cache ready:", wx_5d.shape)
+        print("weather cache ready:", wx_5d.shape, "NaNs remaining:", int(np.isnan(wx_5d).sum()))
 
     json.dump(dict(T=T, M=M, H5=H5, W5=W5, H8=H8, W8=W8, win_start=[f"{w:%Y-%m-%d}" for w in W],
                    month_start=[f"{p.start_time:%Y-%m-%d}" for p in months], month_end=[f"{p.end_time:%Y-%m-%d}" for p in months]),

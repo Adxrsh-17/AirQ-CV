@@ -124,12 +124,31 @@ class SeasonalPrior(nn.Module):
         ang = 2 * math.pi * doy[..., None] / 365.25 * k
         return torch.cat([torch.ones_like(doy)[..., None], ang.sin(), ang.cos()], -1)
     def forward(s, doy, crop, out_hw):
-        i0, j0, h, w = crop
         Wm = s.W.flatten(0, 1)[None]
-        Wm = s.smooth(Wm)[0].view_as(s.W)[:, :, i0:i0 + h, j0:j0 + w]
-        ph, pw = out_hw[0] - Wm.shape[-2], out_hw[1] - Wm.shape[-1]
-        if ph > 0 or pw > 0: Wm = F.pad(Wm, (0, max(pw, 0), 0, max(ph, 0)), mode="replicate")
-        return torch.einsum("bqk,ckhw->bqchw", s.basis(doy), Wm)
+        Wm = s.smooth(Wm)[0].view_as(s.W)
+        basis = s.basis(doy)
+        B = doy.size(0)
+        if torch.is_tensor(crop) and crop.dim() == 2 and crop.size(0) == B:
+            slices = []
+            for b in range(B):
+                i0, j0, h, w = int(crop[b, 0]), int(crop[b, 1]), int(crop[b, 2]), int(crop[b, 3])
+                sub = Wm[:, :, i0:i0 + h, j0:j0 + w]
+                ph, pw = out_hw[0] - sub.shape[-2], out_hw[1] - sub.shape[-1]
+                if ph > 0 or pw > 0: sub = F.pad(sub, (0, max(pw, 0), 0, max(ph, 0)), mode="replicate")
+                slices.append(sub)
+            Wm_b = torch.stack(slices, 0)
+            return torch.einsum("bqk,bckhw->bqchw", basis, Wm_b)
+        else:
+            if torch.is_tensor(crop) and crop.dim() == 2:
+                i0, j0, h, w = int(crop[0, 0]), int(crop[0, 1]), int(crop[0, 2]), int(crop[0, 3])
+            elif torch.is_tensor(crop) and crop.dim() == 1:
+                i0, j0, h, w = int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3])
+            else:
+                i0, j0, h, w = [int(v) for v in crop]
+            sub = Wm[:, :, i0:i0 + h, j0:j0 + w]
+            ph, pw = out_hw[0] - sub.shape[-2], out_hw[1] - sub.shape[-1]
+            if ph > 0 or pw > 0: sub = F.pad(sub, (0, max(pw, 0), 0, max(ph, 0)), mode="replicate")
+            return torch.einsum("bqk,ckhw->bqchw", basis, sub)
 
 class MonotoneGate(nn.Module):
     def __init__(s, n_ch):
@@ -138,10 +157,12 @@ class MonotoneGate(nn.Module):
         return torch.exp(-F.softplus(s.raw)[None] * (h_days[:, None] / 150.0))
 
 class DCNet(nn.Module):
-    def __init__(s, n_poll=3, full_hw=(123, 95), horizons=HORIZONS_DAYS, fine_ratio=8,
-                 dim=192, attn_layers=2, heads=6, p=0.1, use_B=True, use_s2=True, use_weather=True, so2_idx=2):
+    def __init__(s, n_poll=1, full_hw=(123, 95), horizons=HORIZONS_DAYS, fine_ratio=8,
+                 dim=192, attn_layers=2, heads=6, p=0.1, use_B=True, use_s2=True, use_weather=True, so2_idx=2,
+                 long_mem_dropout=0.0):
         super().__init__()
         s.n_poll, s.horizons, s.use_B, s.use_s2, s.use_weather, s.so2_idx = n_poll, horizons, use_B, use_s2, use_weather, so2_idx
+        s.long_mem_dropout = long_mem_dropout
         s.Q = len(horizons)
         s.register_buffer("h_days", torch.tensor(horizons, dtype=torch.float32))
         s.fast = FastEncoder(c_in=n_poll)
@@ -172,6 +193,12 @@ class DCNet(nn.Module):
         s2, lm = batch["s2_slow"], batch["long_mem"]
         crop, doy_tgt = batch["crop"], batch["doy_tgt"]
         B = v.size(0)
+
+        # Spatial / Historical Dropout on long_mem to prevent S2 shortcut
+        if s.training and s.long_mem_dropout > 0:
+            drop_mask = (torch.rand(B, 1, 1, 1, device=lm.device) >= s.long_mem_dropout).float()
+            lm = lm * drop_mask
+
         cal_items = [batch["doy_org_sc"], torch.sin(2*math.pi*doy_tgt/365.25), torch.cos(2*math.pi*doy_tgt/365.25)]
         if s.use_weather and "weather" in batch and batch["weather"] is not None:
             cal_items.append(batch["weather"])
@@ -213,9 +240,12 @@ def dcnet_loss(out, y, ymask, so2_event=None, so2_idx=2, lam_grad=0.1, lam_peak=
                peak_thr=None, hweights=None):
     tot = 0.0
     q50, q10, q90 = out["q50"], out["q10"], out["q90"]
+    n_poll = y.size(2)
     w = 1.0
     if peak_thr is not None:
-        w = 1.0 + lam_peak * torch.sigmoid((y - peak_thr[None, None, :, None, None]) / 0.25)
+        peak_t = torch.as_tensor(peak_thr, dtype=y.dtype, device=y.device)
+        if peak_t.numel() == n_poll:
+            w = 1.0 + lam_peak * torch.sigmoid((y - peak_t[None, None, :, None, None]) / 0.25)
     m = ymask * w
     tot = tot + masked_pinball(q50, y, m, 0.5) + 0.5 * masked_pinball(q10, y, m, 0.1) + 0.5 * masked_pinball(q90, y, m, 0.9)
     gx = lambda t: t[..., :, 1:] - t[..., :, :-1]
@@ -223,7 +253,7 @@ def dcnet_loss(out, y, ymask, so2_event=None, so2_idx=2, lam_grad=0.1, lam_peak=
     mx, my = ymask[..., :, 1:] * ymask[..., :, :-1], ymask[..., 1:, :] * ymask[..., :-1, :]
     tot = tot + lam_grad * ((gx(q50) - gx(y)).abs() * mx).sum() / mx.sum().clamp(min=1) \
                 + lam_grad * ((gy(q50) - gy(y)).abs() * my).sum() / my.sum().clamp(min=1)
-    if so2_event is not None:
+    if so2_event is not None and so2_idx is not None and so2_idx < n_poll:
         mk = ymask[:, :, so2_idx]
         bce = F.binary_cross_entropy_with_logits(out["occ_logit"], so2_event, reduction="none") * mk
         tot = tot + lam_occ * bce.sum() / mk.sum().clamp(min=1)

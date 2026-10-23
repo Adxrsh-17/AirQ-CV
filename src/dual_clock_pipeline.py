@@ -253,7 +253,8 @@ def meteorological_normalisation(no2_cube, meta_df, era5_df):
 def fit_two_way_fixed_effects(df_land, deweathered_cube, meta_df):
     """Estimate two-way fixed effects panel model: Y[p,y] = alpha_p + gamma_y + beta*delta_L + theta*W*delta_L."""
     log.info("Component C2: Estimating Two-Way Fixed-Effects Panel Model...")
-    years = sorted(meta_df["year"].unique())
+    # Restrict training to <= 2022 to avoid data leakage into 2023-2024 test period
+    years = sorted([y for y in meta_df["year"].unique() if y <= 2022])
     H, W = deweathered_cube.shape[1], deweathered_cube.shape[2]
 
     # Annual dry-season deweathered NO2
@@ -427,7 +428,7 @@ def run_dual_clock_forecasting(no2_cube, df_land, panel_res, meta_df, era5_df):
                 b_shift = np.zeros(P)
 
             # Fused Dual-Clock Forecast
-            pred_fused = pred_clim + b_shift + g_h * (phi ** h) * np.nan_to_num(last_anom, 0.0)
+            pred_fused = pred_clim + (1.0 - g_h) * b_shift + g_h * (phi ** h) * np.nan_to_num(last_anom, 0.0)
 
             y_true_list.append(y_obs[valid])
             clim_list.append(pred_clim[valid])
