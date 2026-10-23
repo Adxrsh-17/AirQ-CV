@@ -68,6 +68,7 @@ def main(a):
     # Custom cfg overrides any defaults
     if a.cfg: cfg.update(json.load(open(a.cfg)))
     if a.batch: cfg["batch"] = a.batch
+    if a.max_epochs and a.max_epochs > 0: cfg["epochs"] = a.max_epochs
 
     torch.manual_seed(a.seed); np.random.seed(a.seed)
 
@@ -156,7 +157,7 @@ if __name__ == "__main__":
     ap.add_argument("--use_weather", type=int, default=1)
     ap.add_argument("--use_B", type=int, default=1)
     ap.add_argument("--use_s2", type=int, default=1)
-    ap.add_argument("--max_epochs", type=int, default=0)
+    ap.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=0)
     ap.add_argument("--stage", default="1", choices=["1", "2", "legacy"])
     ap.add_argument("--poll", default="NO2", choices=["NO2", "all"])
     ap.add_argument("--n_poll", type=int, default=1)
