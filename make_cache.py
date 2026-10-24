@@ -90,8 +90,9 @@ def main(a):
         x[:, ~ok] = np.nan
         return x.astype(np.float16), ok
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        for m in tqdm(range(M), desc="S2 monthly composites (4 workers)"):
+    workers = getattr(a, "workers", 4) or 4
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        for m in tqdm(range(M), desc=f"S2 monthly composites ({workers} workers)"):
             items = [(i, W[i]) for i in np.where(mon_of == m)[0]]
             results = list(executor.map(align_worker, items))
             stack = [r[0] for r in results if r is not None]
@@ -165,6 +166,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--s2_dir"); ap.add_argument("--s5p_dir"); ap.add_argument("--out")
     ap.add_argument("--weather", default=None)
+    ap.add_argument("--workers", type=int, default=4, help="Number of CPU worker threads for raster alignment (default 4)")
     ap.add_argument("--s2_ratio", type=int, default=0, help="S2 subgrid ratio per S5P cell (0=auto: 32 for Chennai ROI ~300MB, 12 for full TN ~2.9GB)")
     ap.add_argument("--roi", default="none", choices=["none", "chennai"], help="Crop ROI region (e.g. 'chennai' for high-res urban study)")
     ap.add_argument("--force_large_cache", type=int, default=0, help="Bypass the 14GB safety check if disk space allows")
