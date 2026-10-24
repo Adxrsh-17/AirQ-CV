@@ -4,7 +4,7 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     # Read code files
-    code_files = ["align_tn.py", "dataset.py", "dcnet.py", "train.py", "evaluate.py", "make_cache.py", "app.py"]
+    code_files = ["align_tn.py", "dataset.py", "dcnet.py", "train.py", "evaluate.py", "make_cache.py", "app.py", "check_cache.py", "landuse_baseline.py"]
     code_contents = {}
     for cf in code_files:
         with open(os.path.join(root, cf), "r") as f:
@@ -220,11 +220,19 @@ def main():
         "metadata": {},
         "outputs": [],
         "source": [
-            "EPOCHS = 3  # smoke test: confirm finite train/val loss. Set to 120 for the full run.\n",
+            "# MODE: 'landuse' = Rule.md Stage A (S2-only -> S5P mean column, spatial block CV); 'dcnet' = temporal DC-Net forecaster\n",
+            "MODE = 'landuse'\n",
+            "print('=== CACHE AUDIT (valid-pixel coverage, finiteness) ===')\n",
+            "!python check_cache.py --cache {CACHE_DIR} --csv /kaggle/working/cache_audit.csv\n",
+            "if MODE == 'landuse':\n",
+            "    print('=== STAGE A: LAND-USE-INFERRED POLLUTION (S2 only, no time/weather/S5P inputs) ===')\n",
+            "    !python -u landuse_baseline.py --cache {CACHE_DIR} --out /kaggle/working/runs/landuse --poll NO2 --cnn 1 --blocks 8,4,16\n",
+            "EPOCHS = 3  # DC-Net smoke test. Set to 120 for the full run.\n",
             "POLL = 'all'  # 'all' = NO2+CO+SO2 joint model, 'NO2' = single-pollutant baseline\n",
             "OUT = f'/kaggle/working/runs/dcnet_{POLL}'\n",
-            "print(f'=== STEP 2: TRAINING DC-NET (STAGE 1, POLL={POLL}, {EPOCHS} epochs, single GPU) ===')\n",
-            "!python -u train.py --cache {CACHE_DIR} --out {OUT} --stage 1 --poll {POLL} --long_mem_dropout 0.50 --batch 8 --epochs {EPOCHS} --workers 2 --vram_cap 0.90 --no_dp\n"
+            "if MODE == 'dcnet':\n",
+            "    print(f'=== STEP 2: TRAINING DC-NET (STAGE 1, POLL={POLL}, {EPOCHS} epochs, single GPU) ===')\n",
+            "    !python -u train.py --cache {CACHE_DIR} --out {OUT} --stage 1 --poll {POLL} --long_mem_dropout 0.50 --batch 8 --epochs {EPOCHS} --workers 2 --vram_cap 0.90 --no_dp\n"
         ]
     })
 
@@ -235,8 +243,9 @@ def main():
         "metadata": {},
         "outputs": [],
         "source": [
-            "print('=== STEP 3: RUNNING EMPIRICAL CLIMATOLOGY EVALUATION (2024 HELD-OUT) ===')\n",
-            "!python evaluate.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --split val --out {OUT}\n"
+            "if MODE == 'dcnet':\n",
+            "    print('=== STEP 3: RUNNING EMPIRICAL CLIMATOLOGY EVALUATION (2024 VAL SPLIT) ===')\n",
+            "    !python evaluate.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --split val --out {OUT}\n"
         ]
     })
 
