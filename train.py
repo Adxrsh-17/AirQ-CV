@@ -33,9 +33,19 @@ def evaluate(model, dl, dev, peak, n_poll=1):
         else:
             H, W = int(b["crop"][2]), int(b["crop"][3])
 
-        o = model(model_in(b)); crop = lambda t: t[..., :H, :W]
-        y, ym = crop(b["y"]), crop(b["ym"]); out = {k: (crop(v) if torch.is_tensor(v) and v.dim() >= 4 else v) for k, v in o.items()}
-        tot += dcnet_loss(out, y, ym, crop(b["ev"]), peak_thr=peak).item(); n += 1
+        o = model(model_in(b)); crop_coarse = lambda t: t[..., :H, :W]
+        y, ym = crop_coarse(b["y"]), crop_coarse(b["ym"])
+        out = {}
+        for k, v in o.items():
+            if torch.is_tensor(v) and v.dim() >= 4:
+                if k.startswith("fine_"):
+                    r = max(1, v.shape[-1] // max(1, o["q50"].shape[-1]))
+                    out[k] = v[..., :H * r, :W * r]
+                else:
+                    out[k] = crop_coarse(v)
+            else:
+                out[k] = v
+        tot += dcnet_loss(out, y, ym, crop_coarse(b["ev"]), peak_thr=peak).item(); n += 1
         inside = ((y >= out["q10"]) & (y <= out["q90"])).float() * ym
         cov += inside.sum((0, 3, 4)).cpu().numpy(); cn += ym.sum((0, 3, 4)).cpu().numpy()
         e = ((y - out["q50"]) ** 2 * ym).sum((0, 3, 4)).cpu().numpy(); sse += e

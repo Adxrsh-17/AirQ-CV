@@ -33,6 +33,7 @@ class DCDataset(Dataset):
         s.ws = pd.to_datetime(s.meta["win_start"]); s.we = s.ws + pd.Timedelta(days=5)
         s.ms, s.me = pd.to_datetime(s.meta["month_start"]), pd.to_datetime(s.meta["month_end"])
         s.T, s.M, s.H5, s.W5 = s.meta["T"], s.meta["M"], s.meta["H5"], s.meta["W5"]
+        s.s2_ratio = int(s.meta.get("s2_ratio", s.meta["H8"] // s.meta["H5"] if s.meta.get("H5", 0) > 0 else 8))
         lo, hi = [pd.Timestamp(x) for x in cfg["splits"][split]]
         s.lo, s.hi = lo, hi
         poll_idx = cfg.get("poll_idx", [0])
@@ -81,16 +82,46 @@ class DCDataset(Dataset):
         with np.errstate(all="ignore"): med = np.nanmedian(a, 0)
         return med, np.isfinite(med[0])
 
-    def slow(s, t_end, sl, hw8):
+    @staticmethod
+    def calc_biophysical_indices(bands):
+        """
+        Rank 1 Biophysical Index Stacking:
+        bands[0]: B1 (Coastal Aerosol)
+        bands[1]: B2 (Blue)
+        bands[3]: B4 (Red)
+        bands[4]: B5 (Red Edge 1)
+        bands[7]: B8 (Broad NIR)
+        bands[10]: B11 (SWIR 1)
+        """
+        eps = 1e-6
+        b1, b2, b4, b5, b8, b11 = bands[0], bands[1], bands[3], bands[4], bands[7], bands[10]
+        ndbi = np.clip((b11 - b8) / (b11 + b8 + eps), -1.0, 1.0)         # Built-up / Impervious Industrial
+        ndvi = np.clip((b8 - b4) / (b8 + b4 + eps), -1.0, 1.0)           # Vegetation Canopy Sink
+        ndre = np.clip((b8 - b5) / (b8 + b5 + eps), -1.0, 1.0)           # Red Edge Chlorophyll Sensitivity
+        aer = np.clip(b1 / (b2 + eps), 0.0, 5.0) / 5.0                   # Aerosol Optical Ratio in [0, 1]
+        return np.stack([ndbi, ndvi, ndre, aer], axis=0)
+
+    def slow(s, t_end, sl, hw_res):
         lag = pd.Timedelta(days=s.cfg["s2_lag_days"])
         use = [m for m in range(s.M) if s.me[m] + lag <= t_end][-3:]
-        out = np.zeros((26,) + hw8, np.float32)
+        # 32 channels: 12 bands + 4 biophysical indices + 12 diff bands + 2 diff indices + 2 masks
+        out = np.zeros((32,) + hw_res, np.float32)
         if not use: return out
-        now, ok = s._nanmed(use, sl); out[:12] = np.nan_to_num(s._s2_norm(now), nan=0.0) * ok; out[24] = ok
+        now, ok = s._nanmed(use, sl)
+        now_norm = np.nan_to_num(s._s2_norm(now), nan=0.0) * ok
+        out[:12] = now_norm
+        idx_now = s.calc_biophysical_indices(now) * ok
+        out[12:16] = idx_now
+        out[30] = ok
         prev = [m - 12 for m in use]
         if min(prev) >= 0:
             pv, pok = s._nanmed(prev, sl); both = ok & pok
-            out[12:24] = np.nan_to_num(s._s2_norm(now) - s._s2_norm(pv), nan=0.0) * both; out[25] = 1.0
+            pv_norm = np.nan_to_num(s._s2_norm(pv), nan=0.0)
+            out[16:28] = (now_norm - pv_norm) * both
+            idx_pv = s.calc_biophysical_indices(pv)
+            out[28] = (idx_now[0] - idx_pv[0]) * both                    # Delta NDBI
+            out[29] = (idx_now[1] - idx_pv[1]) * both                    # Delta NDVI
+            out[31] = 1.0
         return out
 
     def __getitem__(s, k):
@@ -125,8 +156,9 @@ class DCDataset(Dataset):
             if rng.rand() < cfg["long_mem_dropout"]:
                 long_mem = np.zeros_like(long_mem)
 
-        sl = (slice(i0 * 8, (i0 + h) * 8), slice(j0 * 8, (j0 + w) * 8))
-        s2 = s.slow(t_end, sl, (h * 8, w * 8))
+        r = s.s2_ratio
+        sl = (slice(i0 * r, (i0 + h) * r), slice(j0 * r, (j0 + w) * r))
+        s2 = s.slow(t_end, sl, (h * r, w * r))
         steps = cfg["steps"]; y = np.zeros((len(steps), s.n_poll, h, w), np.float32); ym = np.zeros_like(y)
         for q, st in enumerate(steps):
             t = o + st
@@ -141,7 +173,7 @@ class DCDataset(Dataset):
             ev = np.zeros((len(steps), h, w), np.float32)
         doy = lambda ts: ts.dayofyear + ts.hour / 24.0
         d_org = doy(s.we[o]); d_tgt = np.array([(s.we[o] + pd.Timedelta(days=5 * st)).dayofyear for st in steps], np.float32)
-        b = dict(fast_v=pad(fv), fast_m=pad(fm), s2_slow=pad(s2, 8), long_mem=pad(long_mem), y=pad(y), ym=pad(ym), ev=pad(ev),
+        b = dict(fast_v=pad(fv), fast_m=pad(fm), s2_slow=pad(s2, r), long_mem=pad(long_mem), y=pad(y), ym=pad(ym), ev=pad(ev),
                  doy_tgt=d_tgt, doy_org_sc=np.array([np.sin(2 * np.pi * d_org / 365.25), np.cos(2 * np.pi * d_org / 365.25)], np.float32),
                  crop=np.array([i0, j0, h, w], dtype=np.int64))
         if s.has_weather and s.wx_feat is not None:

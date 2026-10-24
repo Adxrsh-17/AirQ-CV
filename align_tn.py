@@ -1,9 +1,9 @@
-"""Strict S2<->S5P alignment: S2 is area-averaged onto an exact 8x8-per-S5P-cell grid (valid-pixel weighted)."""
+"""Strict S2<->S5P alignment: S2 is area-averaged onto an exact high-res subgrid per S5P cell (valid-pixel weighted)."""
 import numpy as np, rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import Affine
 
-R = 8   # S2 sub-pixels per S5P cell, per axis
+R = 32   # S2 sub-pixels per S5P cell, per axis (~150m high-resolution; r=40 preserves full ~100m native grid)
 
 def s5p_grid(s5p_path):
     with rasterio.open(s5p_path) as src:

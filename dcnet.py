@@ -86,7 +86,7 @@ class FastEncoder(nn.Module):
         return s.last1(x1), h2, h3, h4
 
 class S2SlowEncoder(nn.Module):
-    def __init__(s, c_in=26, ch=(24, 32, 48, 64), p=0.05):
+    def __init__(s, c_in=32, ch=(24, 32, 48, 64), p=0.05):
         super().__init__()
         s.stem = nn.Conv2d(c_in, ch[0], 3, padding=1, padding_mode="reflect")
         s.b1 = ResBlock(ch[0], ch[0], p)
@@ -94,9 +94,35 @@ class S2SlowEncoder(nn.Module):
         s.d2, s.b4 = nn.Conv2d(ch[1], ch[2], 3, 2, 1), ResBlock(ch[2], ch[2], p)
         s.d3, s.b8 = nn.Conv2d(ch[2], ch[3], 3, 2, 1), ResBlock(ch[3], ch[3], p)
     def forward(s, x):
+        # Adaptive handling for both 32 biophysical stacked channels and 26 legacy channels
+        if x.size(1) != s.stem.in_channels:
+            if x.size(1) < s.stem.in_channels:
+                x = F.pad(x, (0, 0, 0, 0, 0, s.stem.in_channels - x.size(1)))
+            else:
+                x = x[:, :s.stem.in_channels]
         f1 = s.b1(F.silu(s.stem(x)))
         f2 = s.b2(s.d1(f1)); f4 = s.b4(s.d2(f2)); f8 = s.b8(s.d3(f4))
         return f1, f2, f4, f8
+
+class FineDisaggregationHead(nn.Module):
+    """
+    Rank 1 Physics-Guided Fine Disaggregation Head:
+    Fuses high-res S2 biophysical features (NDBI/NDVI/SWIR) with coarse regional latent state
+    to predict fine-scale emission modulation at native spatial resolution.
+    """
+    def __init__(s, c_trunk=64, c_f1=24, n_poll=1, p=0.05):
+        super().__init__()
+        s.fuse = nn.Sequential(
+            nn.Conv2d(c_trunk + c_f1, 48, 3, padding=1, padding_mode="reflect"),
+            nn.SiLU(),
+            ResBlock(48, 48, p),
+            nn.Conv2d(48, n_poll, 1)
+        )
+        nn.init.zeros_(s.fuse[-1].weight)
+        nn.init.zeros_(s.fuse[-1].bias)
+    def forward(s, trunk, f1):
+        trunk_up = F.interpolate(trunk, size=f1.shape[-2:], mode="bilinear", align_corners=False)
+        return s.fuse(torch.cat([trunk_up, f1], 1))
 
 class LongMemoryEncoder(nn.Module):
     def __init__(s, c_in=72, ch=64, p=0.05):
@@ -166,7 +192,8 @@ class DCNet(nn.Module):
         s.Q = len(horizons)
         s.register_buffer("h_days", torch.tensor(horizons, dtype=torch.float32))
         s.fast = FastEncoder(c_in=n_poll)
-        s.slow = S2SlowEncoder()
+        s.slow = S2SlowEncoder(c_in=32)
+        s.fine_head = FineDisaggregationHead(c_trunk=64, c_f1=24, n_poll=n_poll, p=p)
         s.long = LongMemoryEncoder(c_in=12 * n_poll * 2)
         n_cond = 2 + 2 * s.Q + (8 if use_weather else 0)
         cond = 32
@@ -209,8 +236,11 @@ class DCNet(nn.Module):
         else:
             H, W = v.shape[-2:]
             s8f = v.new_zeros(B, 64, H, W); s4f = v.new_zeros(B, 48, 2*H, 2*W); s2f = v.new_zeros(B, 32, 4*H, 4*W)
+            s1 = v.new_zeros(B, 24, H, W)
         lmf = s.long(lm)
-        s8_h2 = F.avg_pool2d(s8f, 2); s8_h3 = F.avg_pool2d(s8f, 4)
+        s8_native = F.interpolate(s8f, size=f1.shape[-2:], mode="bilinear", align_corners=False)
+        s8_h2 = F.interpolate(s8f, size=h2.shape[-2:], mode="bilinear", align_corners=False)
+        s8_h3 = F.interpolate(s8f, size=h3.shape[-2:], mode="bilinear", align_corners=False)
         z = s.fuse(torch.cat([h4, F.adaptive_avg_pool2d(s8f, h4.shape[-2:]), F.adaptive_avg_pool2d(lmf, h4.shape[-2:])], 1))
         z = s.film_b(z, cal)
         for blk in s.attn: z = blk(z)
@@ -219,17 +249,23 @@ class DCNet(nn.Module):
         d2 = s.up2(F.interpolate(d3, size=h2.shape[-2:], mode="bilinear", align_corners=False))
         d2 = s.dec2(torch.cat([d2, s.ag2(h2, s8_h2)], 1))
         d1 = s.up1(F.interpolate(d2, size=f1.shape[-2:], mode="bilinear", align_corners=False))
-        d1 = s.dec1(torch.cat([d1, s.ag1(f1, s8f)], 1))
+        d1 = s.dec1(torch.cat([d1, s.ag1(f1, s8_native)], 1))
         d1 = s.film_d(d1, cal)
-        trunk = F.silu(s.mix_native(torch.cat([d1, s8f, lmf], 1)))
+        trunk = F.silu(s.mix_native(torch.cat([d1, s8_native, lmf], 1)))
         out = s.head(trunk).view(B, s.Q, s.n_poll, 3, *trunk.shape[-2:])
         a, wlo, whi = out[:, :, :, 0], F.softplus(out[:, :, :, 1]) + 1e-3, F.softplus(out[:, :, :, 2]) + 1e-3
         prior = s.prior(doy_tgt, crop, trunk.shape[-2:])
         g = s.gate(s.h_days)[None, :, :, None, None]
-        Bterm = s.Bhead(torch.cat([trunk, s8f], 1))[:, None] if (s.use_B and s.use_s2) else 0.0
+        Bterm = s.Bhead(torch.cat([trunk, s8_native], 1))[:, None] if (s.use_B and s.use_s2) else 0.0
         bscale = (1 - g)
         med = prior + bscale * Bterm + g * a
-        return {"q50": med, "q10": med - wlo, "q90": med + whi, "occ_logit": s.occ(trunk), "B": Bterm}
+
+        # Rank 1: High-Resolution Disaggregation & Fine-Scale Prediction
+        fine_mod = s.fine_head(trunk, s1) if s.use_s2 else torch.zeros(B, s.n_poll, *s1.shape[-2:], device=med.device)
+        med_up = F.interpolate(med.flatten(0, 1), size=s1.shape[-2:], mode="bilinear", align_corners=False).view(B, s.Q, s.n_poll, *s1.shape[-2:])
+        fine_q50 = med_up + fine_mod[:, None]
+
+        return {"q50": med, "q10": med - wlo, "q90": med + whi, "fine_q50": fine_q50, "occ_logit": s.occ(trunk), "B": Bterm}
 
 def masked_pinball(pred, target, mask, tau):
     e = target - pred
@@ -237,7 +273,7 @@ def masked_pinball(pred, target, mask, tau):
     return l.sum() / mask.sum().clamp(min=1.0)
 
 def dcnet_loss(out, y, ymask, so2_event=None, so2_idx=2, lam_grad=0.1, lam_peak=0.5, lam_B=1e-3, lam_occ=0.2,
-               peak_thr=None, hweights=None):
+               lam_mass=0.1, peak_thr=None, hweights=None):
     tot = 0.0
     q50, q10, q90 = out["q50"], out["q10"], out["q90"]
     n_poll = y.size(2)
@@ -253,6 +289,14 @@ def dcnet_loss(out, y, ymask, so2_event=None, so2_idx=2, lam_grad=0.1, lam_peak=
     mx, my = ymask[..., :, 1:] * ymask[..., :, :-1], ymask[..., 1:, :] * ymask[..., :-1, :]
     tot = tot + lam_grad * ((gx(q50) - gx(y)).abs() * mx).sum() / mx.sum().clamp(min=1) \
                 + lam_grad * ((gy(q50) - gy(y)).abs() * my).sum() / my.sum().clamp(min=1)
+
+    # Rank 1: Area-to-Point Mass Conservation Integral Loss (Late Pooling)
+    if "fine_q50" in out and out["fine_q50"] is not None:
+        fine_pred = out["fine_q50"]
+        coarse_pool = F.adaptive_avg_pool2d(fine_pred.flatten(0, 1), y.shape[-2:]).view_as(y)
+        mass_loss = ((coarse_pool - y).abs() * m).sum() / m.sum().clamp(min=1.0)
+        tot = tot + lam_mass * mass_loss
+
     if so2_event is not None and so2_idx is not None and so2_idx < n_poll:
         mk = ymask[:, :, so2_idx]
         bce = F.binary_cross_entropy_with_logits(out["occ_logit"], so2_event, reduction="none") * mk

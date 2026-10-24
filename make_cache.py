@@ -31,7 +31,8 @@ def main(a):
     for m in range(M):
         ii = np.where(mon_of == m)[0]; c = msk[ii].sum(0)
         s5m[m] = (val[ii] * msk[ii]).sum(0) / np.maximum(c, 1); s5ok[m] = c > 0
-    H8, W8 = H5 * R, W5 * R
+    R_use = getattr(a, "s2_ratio", R) or R
+    H8, W8 = H5 * R_use, W5 * R_use
     s2m = np.lib.format.open_memmap(os.path.join(a.out, "s2_month.npy"), "w+", np.float16, (M, 12, H8, W8))
     s2ok = np.lib.format.open_memmap(os.path.join(a.out, "s2_month_ok.npy"), "w+", np.uint8, (M, H8, W8))
 
@@ -39,7 +40,7 @@ def main(a):
         i, w_date = item
         p = os.path.join(a.s2_dir, f"s2_{w_date:%Y%m%d}.tif")
         if not os.path.exists(p): return None
-        x, v = align_s2_to_s5p(p, tf, H5, W5, crs); ok = v[0] > 0.5
+        x, v = align_s2_to_s5p(p, tf, H5, W5, crs, r=R_use); ok = v[0] > 0.5
         x[:, ~ok] = np.nan
         return x.astype(np.float16), ok
 
@@ -109,15 +110,16 @@ def main(a):
         np.save(os.path.join(a.out, "weather_5d.npy"), wx_5d)
         print("weather cache ready:", wx_5d.shape, "NaNs remaining:", int(np.isnan(wx_5d).sum()))
 
-    json.dump(dict(T=T, M=M, H5=H5, W5=W5, H8=H8, W8=W8, win_start=[f"{w:%Y-%m-%d}" for w in W],
+    json.dump(dict(T=T, M=M, H5=H5, W5=W5, H8=H8, W8=W8, s2_ratio=R_use, win_start=[f"{w:%Y-%m-%d}" for w in W],
                    month_start=[f"{p.start_time:%Y-%m-%d}" for p in months], month_end=[f"{p.end_time:%Y-%m-%d}" for p in months]),
               open(os.path.join(a.out, "meta.json"), "w"))
-    print("cache ready:", T, "windows,", M, "months, S5P grid", (H5, W5), "S2 grid", (H8, W8))
+    print("cache ready:", T, "windows,", M, "months, S5P grid", (H5, W5), "S2 grid", (H8, W8), f"(ratio {R_use}x)")
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--s2_dir"); ap.add_argument("--s5p_dir"); ap.add_argument("--out")
     ap.add_argument("--weather", default=None)
+    ap.add_argument("--s2_ratio", type=int, default=R, help="S2 subgrid ratio per S5P cell (default 32 for ~150m, 40 for ~100m native)")
     ap.add_argument("--start", default="2019-01-01"); ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--zero_is_invalid", type=int, default=1)
     main(ap.parse_args())
