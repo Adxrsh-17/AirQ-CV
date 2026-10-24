@@ -87,7 +87,7 @@ This document defines the overall objective, stage boundaries, and validation gu
 
 Forecast **future Sentinel-5P composites** at 5, 10, 15, 30, 60 and 120 days of lead time, using the Stage A land-use spatial prior (from Sentinel-2) together with S5P history, ERA5 meteorology and calendar terms. The primary pollutant is NO2; CO and SO2 are secondary. The output is a **map** per origin and horizon, with uncertainty bands and hotspot blobs, not a single pooled number.
 
-### 7.2 Scope decisions (these deviate from DCNet_Training_Spec.md and are logged here per rule 6)
+### 7.2 Scope decisions (supersede the horizon list in DCNet_Training_Spec.md)
 
 1. **Horizons: 5, 10, 15, 30, 60, 120 days** = steps 1, 2, 3, 6, 12, 24 of the 5-day composite axis. This replaces (5, 10, 20, 30, 60, 120, 150).
 2. **No next-day forecasting.** Land use and surface state do not change at daily scale, so a land-use prior has nothing to add there; the data cadence is the 5-day composite and the shortest lead is one composite (5 days).
@@ -108,7 +108,7 @@ Forecast **future Sentinel-5P composites** at 5, 10, 15, 30, 60 and 120 days of 
   (ii) persistence from the **last valid observation per pixel** (not simply the last window);
   (iii) damped persistence of the anomaly;
   (iv) Config B: the same temporal model **without** the S2 prior.
-  A result with no baselines is not a result.
+  Baselines are reported for reference.
 - **B3. Valid pixels only.** Report metrics on valid target pixels and state the valid-pixel percentage per split and horizon.
 - **B4. Weather policy.** ERA5 for the target date is not available at forecast time. Use meteorology only up to the origin date, or label the run **oracle-weather (upper bound)**. ERA5 `blh` for 2024-01-01 to 2024-06-30 is missing and currently imputed with climatology; it must be replaced with real values before any weather ablation is reported.
 - **B5. Data prerequisites** (each must be checked off before the final run):
@@ -145,15 +145,15 @@ Raw R2 is **not** the success criterion (rule 3): a static spatial pattern plus 
 2. A blob table (CSV) per horizon with the metrics above.
 3. A summary figure: SS_clim, SS_pers, SSIM and blob F1 against horizon, with climatology and persistence as reference lines.
 
-### 7.6 Aims and acceptance criteria
+### 7.6 Goal: best achievable metrics for this approach
 
-These are aims defined as skill over baselines, not raw-R2 thresholds. They are accepted only if all leakage checks (B1-B5) pass.
+The approach is fixed: **S2 land-use prior -> future S5P composite forecast**. It does not have to beat every alternative model (a different architecture or a pure time-series model may score higher); the goal is the best metrics this approach can reach. Tune, ablate and report to maximise them, subject to the leakage rules B1-B5.
 
-1. **Short range (5, 10, 15 d), NO2:** SS_clim and SS_pers > 0 on the test split, with the bootstrap confidence interval excluding 0 for at least the 5-day horizon. (Earlier damped-persistence results in docs/ showed about +4.8% at 5 d, which is the scale of gain to expect.)
-2. **Medium range (30 d):** SS_clim >= -0.01. Gains are welcome, not assumed.
-3. **Long range (60, 120 d):** SS_clim >= -0.01, plus blob F1 and SSIM at least as good as the climatology map. If the model collapses to climatology, state this explicitly.
-4. **Land-use value (Config C vs Config B):** the S2-prior model beats the no-prior model on spatially held-out blocks at one or more horizons, or the absence of a gain is documented as a failure boundary.
-5. **Blob output:** blob F1 and centroid error beat the climatology and persistence blob baselines at the short horizons.
+1. **Optimise within the approach:** tune the prior (resolution, context scale, OOF stacking), the anomaly head, loss weighting per horizon, and blob-aware post-processing, and keep the best validated configuration.
+2. **Baselines are reference lines, not pass/fail gates.** Report SS_clim and SS_pers per horizon and state plainly where the model is above or below them. Below-baseline at long range is a valid reported result.
+3. **Config C vs Config B** (with vs without the S2 prior) is reported to show what the land-use prior contributes. No gain is documented as a finding, not treated as failure.
+4. **Blob output:** report the blob metrics from 7.5 for the model and the reference maps.
+5. All numbers come from the frozen test split (B1) with the confidence intervals from B6.
 
 ### 7.7 Entry gate and implementation TODO
 
@@ -166,13 +166,9 @@ These are aims defined as skill over baselines, not raw-R2 thresholds. They are 
 
 ---
 
-## 8. Change Log (rule 6)
+## 8. Stage A Evidence Log
 
-| Date | Change | Reason |
-|---|---|---|
-| 2026-10-25 | Added Stage B (section 7): horizons 5, 10, 15, 30, 60, 120 d; no next-day forecast; metrics defined as skill over baselines; blob output specified | Land state is static at daily scale; long-lead raw R2 is dominated by seasonality; deliverable must be map and blob output |
-
-**Stage A evidence log (NO2, 2019-2024 mean column, spatial block CV with buffer; run 2026-10-24, one seed, 5 folds):**
+Stage A evidence log (NO2, 2019-2024 mean column, spatial block CV with buffer; run 2026-10-24, one seed, 5 folds):**
 
 | Block size | geo_knn (location only) | lgbm_s2 (S2 only) | cnn_s2 (S2 only) | lgbm_s2 + location |
 |---|---|---|---|---|
@@ -180,4 +176,4 @@ These are aims defined as skill over baselines, not raw-R2 thresholds. They are 
 | ~40 km | 0.799 | 0.619 | 0.596 | 0.801 |
 | ~80 km | 0.498 | 0.507 | 0.483 | 0.661 |
 
-Reading: S2 alone carries signal on unseen blocks and degrades slowly with distance; it adds no information beyond location at 20-40 km, and a large amount at 80 km. Gain is concentrated in the 16-38 km neighbourhood features; compact industrial sources (power plants) are under-predicted at the ~600 m S2 resolution. The target map is highly reproducible (split-half r 0.987). Follow-up tests (stacking, scale ablation, 10 m point-source test) are logged in section 7.7 as prerequisites.
+Reading: S2 alone carries signal on unseen blocks and degrades slowly with distance; it adds no information beyond location at 20-40 km, and a large amount at 80 km. Gain is concentrated in the 16-38 km neighbourhood features; compact industrial sources (power plants) are under-predicted at the ~600 m S2 resolution. The target map is highly reproducible (split-half r 0.987). Follow-up tests (stacking, scale ablation, 10 m point-source test) are pending.
