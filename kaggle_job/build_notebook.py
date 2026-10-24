@@ -23,7 +23,7 @@ def main():
         "source": [
             "# AirQ-CV: Dual-Clock Architecture & DC-Net GPU Training\n",
             "### Automated Run Pipeline (Option B: Cloud GDrive Streaming -> GPU Cache -> Training -> Empirical Evaluation)\n",
-            "- **Target Pollutant**: $\\text{NO}_2$ focused (`n_poll=1`)\n",
+            "- **Target Pollutants**: NO2, CO, SO2 (`--poll all`) or NO2 only (`--poll NO2`)\n",
             "- **Historical Shortcut Prevention**: 50% Spatial Dropout on `long_mem`\n",
             "- **Spatial Prior**: Per-sample batch slicing across harmonic lookup tables\n",
             "- **Temporal Split**: Stage 1 (2019–2023 Train, 2024 Held-Out Validation)\n",
@@ -221,8 +221,10 @@ def main():
         "outputs": [],
         "source": [
             "EPOCHS = 3  # smoke test: confirm finite train/val loss. Set to 120 for the full run.\n",
-            "print(f'=== STEP 2: TRAINING DC-NET (STAGE 1, NO2, {EPOCHS} epochs, single GPU) ===')\n",
-            "!python -u train.py --cache {CACHE_DIR} --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs {EPOCHS} --workers 2 --vram_cap 0.90 --no_dp\n"
+            "POLL = 'all'  # 'all' = NO2+CO+SO2 joint model, 'NO2' = single-pollutant baseline\n",
+            "OUT = f'/kaggle/working/runs/dcnet_{POLL}'\n",
+            "print(f'=== STEP 2: TRAINING DC-NET (STAGE 1, POLL={POLL}, {EPOCHS} epochs, single GPU) ===')\n",
+            "!python -u train.py --cache {CACHE_DIR} --out {OUT} --stage 1 --poll {POLL} --long_mem_dropout 0.50 --batch 8 --epochs {EPOCHS} --workers 2 --vram_cap 0.90 --no_dp\n"
         ]
     })
 
@@ -234,7 +236,7 @@ def main():
         "outputs": [],
         "source": [
             "print('=== STEP 3: RUNNING EMPIRICAL CLIMATOLOGY EVALUATION (2024 HELD-OUT) ===')\n",
-            "!python evaluate.py --ckpt /kaggle/working/runs/dcnet_main/best.pt --cache {CACHE_DIR} --split val --out /kaggle/working/runs/dcnet_main\n"
+            "!python evaluate.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --split val --out {OUT}\n"
         ]
     })
 
@@ -246,7 +248,7 @@ def main():
         "outputs": [],
         "source": [
             "import pandas as pd\n",
-            "metrics_path = '/kaggle/working/runs/dcnet_main/dcnet_val_metrics.csv'\n",
+            "metrics_path = f'{OUT}/dcnet_val_metrics.csv'\n",
             "if os.path.exists(metrics_path):\n",
             "    df = pd.read_csv(metrics_path)\n",
             "    print('\\n' + '='*80)\n",
@@ -267,7 +269,7 @@ def main():
         "source": [
             "print('=== STEP 4: LAUNCHING INTERACTIVE GRADIO DASHBOARD SERVICE ===')\n",
             "print('Opening public tunnel... Access the interactive dashboard via the gradio.live URL below:')\n",
-            "!python app.py --ckpt /kaggle/working/runs/dcnet_main/best.pt --cache {CACHE_DIR} --share\n"
+            "!python app.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --share\n"
         ]
     })
 
