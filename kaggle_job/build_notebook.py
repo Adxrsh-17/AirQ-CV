@@ -4,7 +4,7 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     # Read code files
-    code_files = ["align_tn.py", "dataset.py", "dcnet.py", "train.py", "evaluate.py", "make_cache.py"]
+    code_files = ["align_tn.py", "dataset.py", "dcnet.py", "train.py", "evaluate.py", "make_cache.py", "app.py"]
     code_contents = {}
     for cf in code_files:
         with open(os.path.join(root, cf), "r") as f:
@@ -47,7 +47,7 @@ def main():
             "    for d in range(torch.cuda.device_count()):\n",
             "        print(f'  GPU {d}: {torch.cuda.get_device_name(d)} ({torch.cuda.get_device_properties(d).total_memory / (1024**3):.2f} GB)')\n",
             "\n",
-            "!pip install -q rasterio gdown lightgbm\n"
+            "!pip install -q rasterio gdown lightgbm gradio\n"
         ]
     })
 
@@ -239,6 +239,19 @@ def main():
             "    print(df[['pollutant', 'horizon_days', 'R2', 'pearson_r', 'skill_vs_clim_pct', 'coverage_80', 'csi_p90']].to_string())\n",
             "else:\n",
             "    print('Metrics file not found.')\n"
+        ]
+    })
+
+    # Cell 10: Launch Interactive Gradio Dashboard Service
+    cells.append({
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": [
+            "print('=== STEP 4: LAUNCHING INTERACTIVE GRADIO DASHBOARD SERVICE ===')\n",
+            "print('Opening public tunnel... Access the interactive dashboard via the gradio.live URL below:')\n",
+            "!python app.py --ckpt /kaggle/working/runs/dcnet_main/best.pt --cache {CACHE_DIR} --share\n"
         ]
     })
 
