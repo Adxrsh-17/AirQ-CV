@@ -257,8 +257,13 @@ def main():
         "outputs": [],
         "source": [
             "import pandas as pd\n",
+            "if MODE == 'landuse':\n",
+            "    for f_ in sorted(glob.glob('/kaggle/working/runs/landuse/*.csv')):\n",
+            "        print('\\n' + '='*80 + '\\n' + f_ + '\\n' + '='*80); print(pd.read_csv(f_).to_string(index=False))\n",
             "metrics_path = f'{OUT}/dcnet_val_metrics.csv'\n",
-            "if os.path.exists(metrics_path):\n",
+            "if MODE != 'dcnet':\n",
+            "    pass\n",
+            "elif os.path.exists(metrics_path):\n",
             "    df = pd.read_csv(metrics_path)\n",
             "    print('\\n' + '='*80)\n",
             "    print('FINAL EVALUATION METRICS (2024 HELD-OUT SPLIT):')\n",
@@ -281,7 +286,7 @@ def main():
             "    print('=== STEP 4: LAUNCHING INTERACTIVE GRADIO DASHBOARD SERVICE ===')\n",
             "    !python app.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --share\n",
             "else:\n",
-            "    print('Skipping dashboard (LAUNCH_APP=False). Run training/eval outputs are in', OUT)\n"
+            "    print('Skipping dashboard (LAUNCH_APP=False). Outputs are in /kaggle/working/runs/')\n"
         ]
     })
 

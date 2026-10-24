@@ -21,6 +21,8 @@ Usage (Kaggle):
 import argparse, json, os, time, warnings
 import numpy as np
 
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+
 BANDS = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B11", "B12"]
 POLL = {"NO2": 0, "CO": 1, "SO2": 2}
 IDX_NAMES = ["NDVI", "NDBI", "MNDWI", "NDRE"]
@@ -126,6 +128,12 @@ def dilate(mask, r):
         for dj in range(2 * r + 1):
             out |= p[di:di + H, dj:dj + W]
     return out
+
+
+def ring_exclude(cells, idx, H, W, r):
+    """bool per cell: within r cells of any cell in idx (used to buffer inner folds)."""
+    m = np.zeros((H, W), bool); m[cells[idx, 0], cells[idx, 1]] = True
+    d = dilate(m, r); return d[cells[:, 0], cells[:, 1]]
 
 
 def rank(a):
@@ -242,7 +250,10 @@ def main(a):
 
     geo = cells.astype(np.float32)
     idx_cols = [i for i, n in enumerate(names) if any(k in n for k in IDX_NAMES + ["frac_"]) and not n.startswith(("std_", "p10_", "p90_"))]
+    loc_cols = [i for i, n in enumerate(names) if not n.startswith("ctx")]            # own cell only (~5 km)
+    c3_cols = [i for i, n in enumerate(names) if not n.startswith("ctx7")]            # + 3x3 cells (~16 km)
     designs = {"mean": X[:, :1], "geo_knn": geo, "ridge_indices": X[:, idx_cols], "lgbm_s2": X,
+               "lgbm_s2_local": X[:, loc_cols], "lgbm_s2_ctx3": X[:, c3_cols],
                "lgbm_s2_geo": np.concatenate([X, geo], 1)}
 
     rows, oof_all = [], {}
@@ -269,6 +280,29 @@ def main(a):
             m = metrics(y, oof); m.update(model="cnn_s2", block=block); rows.append(m); oof_all[f"cnn_s2_b{block}"] = oof
             log(f"  {'cnn_s2':14s} R2={m['R2']:.3f} spearman={m['spearman']:.3f} hotspot@10%={m['hotspot_precision_top10']:.2f}")
 
+        # stacked test (leak-free): geography trend + S2 correction of the trend's error.
+        # Residual targets for training cells come from an INNER spatial CV with the same block size,
+        # so the S2 model learns to fix hole-filling errors of the size it will face on the test block.
+        oof_trend, oof_fin = np.full(len(y), np.nan), np.full(len(y), np.nan)
+        for f in range(a.k):
+            te, tr = np.where(fc == f)[0], train_sel(f)
+            if len(te) == 0: continue
+            trend_tr = np.full(len(y), np.nan)
+            for g in range(a.k):
+                if g == f: continue
+                it = tr[fc[tr] == g]
+                if len(it) == 0: continue
+                itr = tr[~ring_exclude(cells, it, H5, W5, a.buffer)[tr]]
+                trend_tr[it] = fit_predict("geo_knn", geo[itr], y[itr], geo[it], a.seed)
+            tr2 = tr[np.isfinite(trend_tr[tr])]
+            trend_te = fit_predict("geo_knn", geo[tr], y[tr], geo[te], a.seed)
+            res = fit_predict("lgbm", X[tr2], y[tr2] - trend_tr[tr2], X[te], a.seed)
+            oof_trend[te], oof_fin[te] = trend_te, trend_te + res
+        m = metrics(y, oof_fin); m.update(model="stack_geo+s2", block=block); rows.append(m)
+        mr = metrics(y - oof_trend, oof_fin - oof_trend); mr.update(model="stack_resid_only", block=block); rows.append(mr)
+        oof_all[f"stack_b{block}"] = oof_fin
+        log(f"  {'stack_geo+s2':14s} R2={m['R2']:.3f} residual-only R2={mr['R2']:.3f}")
+
     import pandas as pd
     df = pd.DataFrame(rows)[["block", "model", "R2", "RMSE", "pearson", "spearman", "hotspot_precision_top10", "n"]]
     df.to_csv(os.path.join(a.out, f"landuse_{a.poll}_results.csv"), index=False)
@@ -283,6 +317,10 @@ def main(a):
               f"| S2 beats geography: {'YES' if r[best_s2] > r['geo_knn'] else 'NO'} "
               f"| S2 adds over geography (lgbm_s2_geo - geo_knn): {r['lgbm_s2_geo'] - r['geo_knn']:+.3f} "
               f"| reliability ceiling ~{rel:.3f}")
+        if "stack_geo+s2" in r.index:
+            print(f"   stacking: geo_knn {r['geo_knn']:.3f} -> geo + S2 correction {r['stack_geo+s2']:.3f} "
+                  f"(gain {r['stack_geo+s2'] - r['geo_knn']:+.3f}) | R2 on the residual alone {r['stack_resid_only']:.3f}")
+            print(f"   scale ablation (S2 only): own cell {r['lgbm_s2_local']:.3f} | +16 km {r['lgbm_s2_ctx3']:.3f} | +38 km {r['lgbm_s2']:.3f}")
 
     # feature importance of the S2-only LightGBM fitted on all cells (descriptive only)
     import lightgbm as lgb
@@ -290,6 +328,26 @@ def main(a):
                           subsample_freq=1, colsample_bytree=0.7, random_state=a.seed, verbose=-1, importance_type="gain").fit(X, y)
     imp = sorted(zip(m.feature_importances_, names), reverse=True)[:15]
     print("\nTop S2 features by gain (descriptive, all cells):"); [print(f"  {n:24s} {v:.1f}") for v, n in imp]
+
+    grp = {"own cell": 0.0, "+3x3 (~16 km)": 0.0, "+7x7 (~38 km)": 0.0}
+    for v, n in zip(m.feature_importances_, names):
+        grp["+7x7 (~38 km)" if n.startswith("ctx7") else "+3x3 (~16 km)" if n.startswith("ctx3") else "own cell"] += v
+    tot = sum(grp.values()); print("Gain share by spatial scale:", {k: f"{100 * v / tot:.0f}%" for k, v in grp.items()})
+
+    # error by built-up fraction quartile (S2-derived; an INDEPENDENT land-cover map is the proper check, see notes)
+    fb = X[:, names.index("frac_built")]; edges = np.quantile(fb, [.25, .5, .75]); qb = np.digitize(fb, edges)
+    out = []
+    for block in [int(b) for b in a.blocks.split(",")]:
+        for b in range(4):
+            sel = qb == b
+            if sel.sum() == 0: continue
+            row = dict(block=block, built_quartile=b + 1, frac_built=float(fb[sel].mean()), target_mean=float(y[sel].mean()), n=int(sel.sum()))
+            for k_ in ("geo_knn", "lgbm_s2", "stack"):
+                p_ = oof_all[f"{k_}_b{block}"][sel]
+                row[f"rmse_{k_}"] = float(np.sqrt(np.nanmean((y[sel] - p_) ** 2))); row[f"bias_{k_}"] = float(np.nanmean(p_ - y[sel]))
+            out.append(row)
+    bf = pd.DataFrame(out); bf.to_csv(os.path.join(a.out, f"landuse_{a.poll}_by_builtfrac.csv"), index=False)
+    print("\nError by built-up fraction quartile (1 = least built):"); print(bf.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
 
     try:
         import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
