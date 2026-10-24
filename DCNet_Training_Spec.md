@@ -1,3 +1,5 @@
+> **Superseded in part (2026-10-25):** the current model is DC-Net v2 (`dcnet.py`, Rule.md section 7): horizons 5/10/15/30/60/120 d, output = harmonic climatology + damped anomaly persistence + residual, land-use encoder with context pyramid and SPADE-style modulation, TAU translator, per-horizon FiLM decoder. Code listings below are the v1 reference.
+
 # DC-Net: Dual-Clock S2 + S5P Multi-Horizon Forecaster (pure deep learning)
 
 **Project:** Satellite-Driven Multi-Pollutant Forecasting, Tamil Nadu (Team B6, Amrita School of AI).
@@ -76,7 +78,7 @@ STRUCTURAL SHIFT B  small head on [trunk, S2 native feats], last layer zero-init
 FUSION        q50 = Prior(doy_target) + (1-g(h))*B + g(h)*a ;  q10 = q50 - softplus(w_lo) ;  q90 = q50 + softplus(w_hi)
               g_c(h) = exp(-softplus(raw_c) * h/150): in (0,1], monotone decreasing with lead (learned per pollutant)
 ```
-Horizons (days -> 5-day steps): 5,10,20,30,60,120,150 -> 1,2,4,6,12,24,30. "Short-term 1-5 d" = step 1.
+Horizons (days -> 5-day steps): 5,10,15,30,60,120 -> 1,2,3,6,12,24 (Rule.md section 7; no next-day, no 150 d).
 
 **Parameter table (measured, full_hw=(123,95)):**
 

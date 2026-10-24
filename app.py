@@ -35,13 +35,13 @@ except ImportError:
 # Import model components if available in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
-    from dataset import DCDataset, S5PNorm, WeatherNorm, collate
+    from dataset import DCDataset, collate
     from dcnet import DCNet, HORIZONS_DAYS, HORIZON_STEPS
     HAS_DCNET = True
 except ImportError:
     HAS_DCNET = False
-    HORIZONS_DAYS = (5, 10, 15, 20, 25, 30, 60, 150)
-    HORIZON_STEPS = (1, 2, 3, 4, 5, 6, 12, 30)
+    HORIZONS_DAYS = (5, 10, 15, 30, 60, 120)
+    HORIZON_STEPS = (1, 2, 3, 6, 12, 24)
 
 HORIZON_LABELS = [f"+{d} days (Step #{s})" for d, s in zip(HORIZONS_DAYS, HORIZON_STEPS)]
 SPLITS = {
@@ -78,30 +78,18 @@ class InferenceEngine:
             print("[Engine] No active checkpoint/cache found. Running in high-fidelity simulation mode.")
 
     def _load_live_model(self):
-        ckpt = torch.load(self.ckpt_path, map_location=self.dev)
-        cfg = ckpt.get("cfg", {})
+        ckpt = torch.load(self.ckpt_path, map_location=self.dev, weights_only=False)
+        cfg = ckpt["cfg"]
 
-        # Restore normalizer
-        self.s5_norm = S5PNorm()
-        self.s5_norm.s = ckpt["norm"]["s"]
-        self.s5_norm.mu = ckpt["norm"]["mu"]
-        self.s5_norm.sd = ckpt["norm"]["sd"]
-
-        wx_norm = None
-        if ckpt.get("wx") is not None:
-            wx_norm = WeatherNorm()
-            wx_norm.mu = ckpt["wx"]["mu"]
-            wx_norm.sd = ckpt["wx"]["sd"]
-
-        # Instantiate datasets for each split
+        # Instantiate datasets for each split (statistics come from the checkpoint: train-only)
         for split_label, split_key in SPLITS.items():
             try:
-                self.datasets[split_key] = DCDataset(
-                    self.cache_dir, split_key, cfg,
-                    norm=self.s5_norm, s2_stats=ckpt.get("s2"), wx_norm=wx_norm
-                )
+                ds_ = DCDataset(self.cache_dir, split_key, cfg, stats=ckpt["stats"])
+                if ds_.origins: self.datasets[split_key] = ds_
             except Exception as e:
                 print(f"[Engine] Split {split_key} load warning: {e}")
+        if not self.datasets: raise RuntimeError("no split with origins in this cache")
+        self.s5_norm = next(iter(self.datasets.values())).norm
 
         sample_ds = next(iter(self.datasets.values()))
         self.n_poll = sample_ds.n_poll
@@ -110,14 +98,8 @@ class InferenceEngine:
         self.H5, self.W5 = sample_ds.H5, sample_ds.W5
         self.s2_ratio = sample_ds.s2_ratio
 
-        # Load DC-Net
-        use_wx = wx_norm is not None
-        self.model = DCNet(
-            self.n_poll, (self.H5, self.W5),
-            use_B=bool(cfg.get("use_B", 1)),
-            use_s2=bool(cfg.get("use_s2", 1)),
-            use_weather=use_wx
-        ).to(self.dev)
+        # Load DC-Net v2
+        self.model = DCNet(**ckpt["model_kwargs"]).to(self.dev)
         self.model.load_state_dict(ckpt["model"])
         self.model.eval()
 
@@ -150,12 +132,7 @@ class InferenceEngine:
 
             # Run DC-Net model
             H, W = int(b["crop"][0, 2]), int(b["crop"][0, 3])
-            m_in = dict(fast_v=b["fast_v"], fast_m=b["fast_m"], s2_slow=b["s2_slow"],
-                        long_mem=b["long_mem"], crop=b["crop"], doy_tgt=b["doy_tgt"],
-                        doy_org_sc=b["doy_org_sc"])
-            if "weather" in b: m_in["weather"] = b["weather"]
-
-            out = self.model(m_in)
+            out = self.model(b)
 
             # Invert normalized S5P scale to physical concentrations
             c = ds.poll_idx[poll_idx]
@@ -178,8 +155,8 @@ class InferenceEngine:
             else:
                 fine_pred = np.repeat(np.repeat(q50, r, axis=0), r, axis=1)
 
-            # Surface context (NDBI index from S2 channel 12)
-            s2_data = b["s2_slow"][0].cpu().numpy()
+            # Surface context (annual NDBI, S2 channel 12)
+            s2_data = b["s2"][0].cpu().numpy()
             biophysical = s2_data[12, :H*r, :W*r] if s2_data.shape[0] > 12 else np.zeros((H*r, W*r))
 
             origin_date = f"{ds.ws[ds.origins[sample_idx]]:%Y-%m-%d}"

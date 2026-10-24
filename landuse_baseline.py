@@ -239,6 +239,25 @@ def main(a):
     log(f"target {a.poll} mean {years[0]}-{years[-1]}: {len(y)} valid land cells of {H5*W5} "
         f"(min_obs={a.min_obs}, min_land={a.min_land}); features {X.shape[1]}")
 
+    if a.prior_only:
+        # Stage B input (Rule.md 7.3): S2-only land-use prior map, SPATIAL OUT-OF-FOLD (each cell predicted by a model
+        # that never saw its block or the buffer ring), target period y0..y1 (set y1 to the last TRAINING year).
+        fold_map = spatial_folds(H5, W5, a.prior_block, a.k, a.seed); fc = fold_map[valid]
+        oof = np.full(len(y), np.nan)
+        for f in range(a.k):
+            te = np.where(fc == f)[0]
+            if len(te) == 0: continue
+            tr = np.where(~dilate((fold_map == f) & valid, a.buffer)[valid])[0]
+            oof[te] = fit_predict("lgbm_s2", X[tr], y[tr], X[te], a.seed)
+        m = metrics(y, oof)
+        prior = np.full((H5, W5), np.nan, np.float32)
+        prior[valid] = np.exp(oof) if a.log_target else oof              # physical units, NaN where no prediction
+        os.makedirs(a.prior_out or a.out, exist_ok=True)
+        fn = os.path.join(a.prior_out or a.out, f"prior_{a.poll}.npy"); np.save(fn, prior)
+        log(f"prior_{a.poll}: OOF lgbm_s2, block {a.prior_block} cells, years {years[0]}-{years[-1]}: "
+            f"R2={m['R2']:.3f} spearman={m['spearman']:.3f} coverage={valid.mean():.2f} -> {fn}")
+        return
+
     # reliability ceiling: how reproducible is the target map itself? (split-half by years)
     h = len(years) // 2
     t1, _ = s5p_mean(a.cache, meta, p, years[:h]); t2, _ = s5p_mean(a.cache, meta, p, years[h:])
@@ -378,4 +397,6 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=5); ap.add_argument("--buffer", type=int, default=2)
     ap.add_argument("--cnn", type=int, default=1); ap.add_argument("--ctx", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=40); ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--prior_only", type=int, default=0, help="1 = only export the OOF S2 prior map for Stage B")
+    ap.add_argument("--prior_block", type=int, default=8); ap.add_argument("--prior_out", default=None)
     main(ap.parse_args())

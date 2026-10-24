@@ -1,48 +1,65 @@
-"""DC-Net: Dual-Clock S2+S5P multi-horizon forecaster (pure deep learning)."""
+"""DC-Net v2: land-use-prior temporal forecaster (Rule.md section 7, Stage B).
+
+Forecast in z-space (arcsinh-normalised S5P) at horizons 5..120 days:
+
+    q50(x, t+h) = clim(x, doy(t+h))                          fixed harmonic climatology (training years)
+                + alpha_h * decay(age) * last_anomaly(x)     damped anomaly persistence (learned per horizon)
+                + Delta_h(x)                                 network residual (zero-initialised)
+
+so training starts exactly at "climatology + damped persistence" and the network only has to learn what
+the baselines miss. Components and why they are here:
+
+  * LandUseEncoder   native-resolution S2 (annual + seasonal bands, NDBI/NDVI/MNDWI/NDRE/BSI, change),
+                     within-cell index statistics and built/veg/water fractions (Stage A's best features),
+                     Stage A out-of-fold prior map, and a context pyramid at ~16/38/80 km (Stage A found the
+                     land-use signal lives at 16-38 km neighbourhood scale, not in the own cell).
+  * Dynamics encoder mask-aware partial-conv stem per window -> SimVP-style time-as-channels encoder
+                     (parallel, no recurrence) + 12-month anomaly memory.
+  * TAU translator   Temporal Attention Unit blocks (Tan et al., CVPR 2023): large-kernel depthwise
+                     "statical" attention x channel "dynamical" attention, FiLM-conditioned on calendar and
+                     weather history (origin and before only).
+  * Per-horizon decoder  shared U-Net decoder run once per lead time with MetNet-style lead-time FiLM, and
+                     land-use-adaptive normalisation (SPADE-style): the land-use map sets how each pixel's
+                     anomaly is scaled/shifted, i.e. "same weather, different response over a city vs a forest".
+  * Heads            non-crossing quantiles q10/q50/q90; SO2 occurrence logit.
+"""
 import math, torch, torch.nn as nn, torch.nn.functional as F
 
-HORIZONS_DAYS = (5, 10, 20, 30, 60, 120, 150)      # 5-day steps: 1,2,4,6,12,24,30
-HORIZON_STEPS = tuple(d // 5 for d in HORIZONS_DAYS)
+HORIZONS_DAYS = (5, 10, 15, 30, 60, 120)              # Rule.md 7.2 (no next-day: 5-day composites)
+HORIZON_STEPS = tuple(d // 5 for d in HORIZONS_DAYS)   # 1, 2, 3, 6, 12, 24
+S2_IDX_CH = slice(12, 17)    # annual NDBI, NDVI, MNDWI, NDRE, BSI (dataset.S2_ANN_IDX)
+S2_ANN_OK_CH = 34
+
 
 def gn(c, g=8): return nn.GroupNorm(min(g, c), c)
 
+
 class ResBlock(nn.Module):
-    def __init__(s, cin, cout, p_drop=0.0):
+    def __init__(s, cin, cout, p=0.0):
         super().__init__()
-        s.n1, s.c1 = gn(cin), nn.Conv2d(cin, cout, 3, padding=1, padding_mode="reflect")
-        s.n2, s.c2 = gn(cout), nn.Conv2d(cout, cout, 3, padding=1, padding_mode="reflect")
+        s.n1, s.c1 = gn(cin), nn.Conv2d(cin, cout, 3, padding=1)
+        s.n2, s.c2 = gn(cout), nn.Conv2d(cout, cout, 3, padding=1)
         s.skip = nn.Conv2d(cin, cout, 1) if cin != cout else nn.Identity()
-        s.drop = nn.Dropout2d(p_drop)
+        s.drop = nn.Dropout2d(p)
     def forward(s, x):
         h = s.c1(F.silu(s.n1(x))); h = s.c2(s.drop(F.silu(s.n2(h))))
         return h + s.skip(x)
 
-class ConvGRUCell(nn.Module):
-    def __init__(s, cin, ch, k=3):
-        super().__init__()
-        s.ch = ch
-        s.gates = nn.Conv2d(cin + ch, 2 * ch, k, padding=k // 2, padding_mode="reflect")
-        s.cand = nn.Conv2d(cin + ch, ch, k, padding=k // 2, padding_mode="reflect")
-    def forward(s, x, h):
-        if h is None: h = x.new_zeros(x.size(0), s.ch, *x.shape[-2:])
-        z, r = torch.sigmoid(s.gates(torch.cat([x, h], 1))).chunk(2, 1)
-        n = torch.tanh(s.cand(torch.cat([x, r * h], 1)))
-        return (1 - z) * h + z * n
 
 class PartialStem(nn.Module):
-    """Mask-aware first conv (partial-conv style): invalid S5P pixels never leak as zeros."""
-    def __init__(s, c_val, cout):
+    """Mask-aware first conv: invalid (cloudy / no retrieval) pixels never leak in as zeros."""
+    def __init__(s, c_in, cout):
         super().__init__()
-        s.conv = nn.Conv2d(c_val, cout, 3, padding=1, padding_mode="reflect", bias=False)
+        s.conv = nn.Conv2d(c_in, cout, 3, padding=1, bias=False)
         s.bias = nn.Parameter(torch.zeros(1, cout, 1, 1))
         s.register_buffer("ones", torch.ones(1, 1, 3, 3))
-        s.mix = nn.Conv2d(cout + c_val, cout, 1)
+        s.mix = nn.Conv2d(cout + c_in, cout, 1)
     def forward(s, v, m):
-        vm = v * m
-        y = s.conv(vm)
+        y = s.conv(v * m)
         msum = F.conv2d(m.mean(1, keepdim=True), s.ones, padding=1)
         y = y * (9.0 / msum.clamp(min=1.0)) * (msum > 0) + s.bias
         return F.silu(s.mix(torch.cat([y, m], 1)))
+
 
 class FiLM(nn.Module):
     def __init__(s, cond, ch):
@@ -51,257 +68,222 @@ class FiLM(nn.Module):
         g, b = s.fc(c).chunk(2, 1)
         return x * (1 + g[..., None, None]) + b[..., None, None]
 
-class RelPosAttnBlock(nn.Module):
-    def __init__(s, dim, heads=6, p=0.1):
+
+class TAU(nn.Module):
+    """Temporal Attention Unit (SimVP v2 / TAU): statical (large-kernel depthwise) x dynamical (channel) attention."""
+    def __init__(s, c, p=0.1):
         super().__init__()
-        s.n1, s.n2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
-        s.attn = nn.MultiheadAttention(dim, heads, dropout=p, batch_first=True)
-        s.mlp = nn.Sequential(nn.Linear(dim, 2 * dim), nn.GELU(), nn.Dropout(p), nn.Linear(2 * dim, dim))
-        s.dw = nn.Conv2d(dim, dim, 3, padding=1, groups=dim, padding_mode="reflect")
+        s.n1, s.n2 = gn(c), gn(c)
+        s.sa = nn.Sequential(nn.Conv2d(c, c, 5, padding=2, groups=c),
+                             nn.Conv2d(c, c, 7, padding=9, dilation=3, groups=c),
+                             nn.Conv2d(c, c, 1))
+        s.da = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(c, max(8, c // 4), 1), nn.SiLU(), nn.Conv2d(max(8, c // 4), c, 1))
+        s.proj = nn.Conv2d(c, c, 1)
+        s.mlp = nn.Sequential(nn.Conv2d(c, 2 * c, 1), nn.GELU(), nn.Conv2d(2 * c, 2 * c, 3, padding=1, groups=2 * c),
+                              nn.Dropout(p), nn.Conv2d(2 * c, c, 1))
     def forward(s, x):
-        B, C, H, W = x.shape
-        x = x + s.dw(x)
-        t = x.flatten(2).transpose(1, 2)
-        h = s.n1(t); t = t + s.attn(h, h, h, need_weights=False)[0]
-        t = t + s.mlp(s.n2(t))
-        return t.transpose(1, 2).reshape(B, C, H, W)
+        h = s.n1(x)
+        x = x + s.proj(h * s.sa(h) * torch.sigmoid(s.da(h)))
+        return x + s.mlp(s.n2(x))
 
-class FastEncoder(nn.Module):
-    def __init__(s, c_in=3, ch=(32, 64, 128, 192), gru=(64, 128, 128), p=0.05):
-        super().__init__()
-        s.stem = PartialStem(c_in, ch[0])
-        s.e1 = ResBlock(ch[0], ch[0], p)
-        s.d1, s.e2 = nn.Conv2d(ch[0], ch[1], 3, 2, 1), ResBlock(ch[1], ch[1], p)
-        s.d2, s.e3 = nn.Conv2d(ch[1], ch[2], 3, 2, 1), ResBlock(ch[2], ch[2], p)
-        s.d3, s.e4 = nn.Conv2d(ch[2], ch[3], 3, 2, 1), ResBlock(ch[3], ch[3], p)
-        s.g2, s.g3, s.g4 = ConvGRUCell(ch[1], gru[0]), ConvGRUCell(ch[2], gru[1]), ConvGRUCell(ch[3], gru[2])
-        s.last1 = nn.Conv2d(ch[0], ch[0], 1)
-    def forward(s, v, m):
-        B, L = v.shape[:2]
-        h2 = h3 = h4 = None
-        for t in range(L):
-            x1 = s.e1(s.stem(v[:, t], m[:, t]))
-            x2 = s.e2(s.d1(x1)); x3 = s.e3(s.d2(x2)); x4 = s.e4(s.d3(x3))
-            h2, h3, h4 = s.g2(x2, h2), s.g3(x3, h3), s.g4(x4, h4)
-        return s.last1(x1), h2, h3, h4
 
-class S2SlowEncoder(nn.Module):
-    def __init__(s, c_in=32, ch=(24, 32, 48, 64), p=0.05):
-        super().__init__()
-        s.stem = nn.Conv2d(c_in, ch[0], 3, padding=1, padding_mode="reflect")
-        s.b1 = ResBlock(ch[0], ch[0], p)
-        s.d1, s.b2 = nn.Conv2d(ch[0], ch[1], 3, 2, 1), ResBlock(ch[1], ch[1], p)
-        s.d2, s.b4 = nn.Conv2d(ch[1], ch[2], 3, 2, 1), ResBlock(ch[2], ch[2], p)
-        s.d3, s.b8 = nn.Conv2d(ch[2], ch[3], 3, 2, 1), ResBlock(ch[3], ch[3], p)
+class ContextPyramid(nn.Module):
+    """Neighbourhood land-use context at several scales (stride-1 average pools, ~16/38/80 km on a 5.5 km grid)."""
+    def __init__(s, c, scales=(3, 7, 15)):
+        super().__init__(); s.scales = scales
+        s.proj = nn.Sequential(nn.Conv2d(c * (1 + len(scales)), c, 1), nn.SiLU())
     def forward(s, x):
-        # Adaptive handling for both 32 biophysical stacked channels and 26 legacy channels
-        if x.size(1) != s.stem.in_channels:
-            if x.size(1) < s.stem.in_channels:
-                x = F.pad(x, (0, 0, 0, 0, 0, s.stem.in_channels - x.size(1)))
-            else:
-                x = x[:, :s.stem.in_channels]
-        f1 = s.b1(F.silu(s.stem(x)))
-        f2 = s.b2(s.d1(f1)); f4 = s.b4(s.d2(f2)); f8 = s.b8(s.d3(f4))
-        return f1, f2, f4, f8
+        f = [x] + [F.avg_pool2d(x, k, 1, k // 2, count_include_pad=False) for k in s.scales]
+        return s.proj(torch.cat(f, 1))
 
-class FineDisaggregationHead(nn.Module):
-    """
-    Rank 1 Physics-Guided Fine Disaggregation Head:
-    Fuses high-res S2 biophysical features (NDBI/NDVI/SWIR) with coarse regional latent state
-    to predict fine-scale emission modulation at native spatial resolution.
-    """
-    def __init__(s, c_trunk=64, c_f1=24, n_poll=1, p=0.05):
+
+class LUMod(nn.Module):
+    """Land-use-adaptive normalisation (SPADE-style): x -> GN(x) * (1 + gamma(u)) + beta(u)."""
+    def __init__(s, c, cu):
         super().__init__()
-        s.fuse = nn.Sequential(
-            nn.Conv2d(c_trunk + c_f1, 48, 3, padding=1, padding_mode="reflect"),
-            nn.SiLU(),
-            ResBlock(48, 48, p),
-            nn.Conv2d(48, n_poll, 1)
-        )
-        nn.init.zeros_(s.fuse[-1].weight)
-        nn.init.zeros_(s.fuse[-1].bias)
-    def forward(s, trunk, f1):
-        trunk_up = F.interpolate(trunk, size=f1.shape[-2:], mode="bilinear", align_corners=False)
-        return s.fuse(torch.cat([trunk_up, f1], 1))
+        s.cu = cu
+        s.norm = nn.GroupNorm(min(8, c), c, affine=cu == 0)
+        if cu:
+            s.sh = nn.Sequential(nn.Conv2d(cu, 64, 3, padding=1), nn.SiLU())
+            s.g, s.b = nn.Conv2d(64, c, 3, padding=1), nn.Conv2d(64, c, 3, padding=1)
+            for m in (s.g, s.b): nn.init.zeros_(m.weight); nn.init.zeros_(m.bias)
+    def forward(s, x, u):
+        x = s.norm(x)
+        if not s.cu or u is None: return x
+        a = s.sh(F.interpolate(u, size=x.shape[-2:], mode="bilinear", align_corners=False) if u.shape[-2:] != x.shape[-2:] else u)
+        return x * (1 + s.g(a)) + s.b(a)
 
-class LongMemoryEncoder(nn.Module):
-    def __init__(s, c_in=72, ch=64, p=0.05):
+
+class LandUseEncoder(nn.Module):
+    def __init__(s, c_s2, c_prior, ratio=8, cu=96, p=0.05):
         super().__init__()
-        s.net = nn.Sequential(nn.Conv2d(c_in, ch, 3, padding=1, padding_mode="reflect"), nn.SiLU(),
-                              ResBlock(ch, ch, p), ResBlock(ch, ch, p))
-    def forward(s, x): return s.net(x)
+        s.c_s2, s.c_prior, s.ratio = c_s2, c_prior, ratio
+        c_coarse = c_prior
+        if c_s2:
+            chans = [24, 32, 48, 64]
+            s.stem = nn.Sequential(nn.Conv2d(c_s2, chans[0], 3, padding=1), ResBlock(chans[0], chans[0], p))
+            n_down = max(0, int(round(math.log2(ratio))))
+            downs, c = [], chans[0]
+            for i in range(n_down):
+                co = chans[min(i + 1, 3)]
+                downs += [nn.Conv2d(c, co, 3, 2, 1), ResBlock(co, co, p)]; c = co
+            s.down = nn.Sequential(*downs)
+            c_coarse += c + 2 * 5 + 3      # learned + index mean/std + built/veg/water fractions
+        s.mix = nn.Sequential(nn.Conv2d(c_coarse, cu, 3, padding=1), ResBlock(cu, cu, p))
+        s.ctx = ContextPyramid(cu)
 
-class AttnGate(nn.Module):
-    def __init__(s, cx, cg, ci):
-        super().__init__()
-        s.wx, s.wg, s.psi = nn.Conv2d(cx, ci, 1), nn.Conv2d(cg, ci, 1), nn.Conv2d(ci, 1, 1)
-    def forward(s, x, g):
-        return x * torch.sigmoid(s.psi(F.silu(s.wx(x) + s.wg(g))))
+    def cell_stats(s, x, hw):
+        """Stage A features computed on the fly: within-cell mean/std of indices + land-cover fractions."""
+        r = s.ratio
+        ok = x[:, S2_ANN_OK_CH:S2_ANN_OK_CH + 1]
+        idx = x[:, S2_IDX_CH]
+        pool = lambda t: F.adaptive_avg_pool2d(t, hw) if r < 1 or (t.shape[-2] // hw[0]) != r else F.avg_pool2d(t, r)
+        w = pool(ok).clamp(min=1e-3)
+        mu = pool(idx * ok) / w
+        sd = (pool(idx ** 2 * ok) / w - mu ** 2).clamp(min=0).sqrt()
+        ndbi, ndvi, mndwi = idx[:, 0:1], idx[:, 1:2], idx[:, 2:3]
+        fr = torch.cat([((ndbi > 0) & (ndvi < 0.2)).float(), (ndvi > 0.4).float(), (mndwi > 0).float()], 1)
+        frac = pool(fr * ok) / w
+        return torch.cat([mu, sd, frac], 1)
 
-class SeasonalPrior(nn.Module):
-    def __init__(s, n_ch, H, W, K=3):
-        super().__init__()
-        s.K = K
-        s.W = nn.Parameter(torch.zeros(n_ch, 1 + 2 * K, H, W))
-        s.smooth = nn.Conv2d(n_ch * (1 + 2 * K), n_ch * (1 + 2 * K), 5, padding=2, groups=n_ch * (1 + 2 * K), bias=False)
-        with torch.no_grad(): s.smooth.weight.fill_(1 / 25.)
-    def basis(s, doy):
-        k = torch.arange(1, s.K + 1, device=doy.device).float()
-        ang = 2 * math.pi * doy[..., None] / 365.25 * k
-        return torch.cat([torch.ones_like(doy)[..., None], ang.sin(), ang.cos()], -1)
-    def forward(s, doy, crop, out_hw):
-        Wm = s.W.flatten(0, 1)[None]
-        Wm = s.smooth(Wm)[0].view_as(s.W)
-        basis = s.basis(doy)
-        B = doy.size(0)
-        if torch.is_tensor(crop) and crop.dim() == 2 and crop.size(0) == B:
-            slices = []
-            for b in range(B):
-                i0, j0, h, w = int(crop[b, 0]), int(crop[b, 1]), int(crop[b, 2]), int(crop[b, 3])
-                sub = Wm[:, :, i0:i0 + h, j0:j0 + w]
-                ph, pw = out_hw[0] - sub.shape[-2], out_hw[1] - sub.shape[-1]
-                if ph > 0 or pw > 0: sub = F.pad(sub, (0, max(pw, 0), 0, max(ph, 0)), mode="replicate")
-                slices.append(sub)
-            Wm_b = torch.stack(slices, 0)
-            return torch.einsum("bqk,bckhw->bqchw", basis, Wm_b)
-        else:
-            if torch.is_tensor(crop) and crop.dim() == 2:
-                i0, j0, h, w = int(crop[0, 0]), int(crop[0, 1]), int(crop[0, 2]), int(crop[0, 3])
-            elif torch.is_tensor(crop) and crop.dim() == 1:
-                i0, j0, h, w = int(crop[0]), int(crop[1]), int(crop[2]), int(crop[3])
-            else:
-                i0, j0, h, w = [int(v) for v in crop]
-            sub = Wm[:, :, i0:i0 + h, j0:j0 + w]
-            ph, pw = out_hw[0] - sub.shape[-2], out_hw[1] - sub.shape[-1]
-            if ph > 0 or pw > 0: sub = F.pad(sub, (0, max(pw, 0), 0, max(ph, 0)), mode="replicate")
-            return torch.einsum("bqk,ckhw->bqchw", basis, sub)
+    def forward(s, s2, prior, hw):
+        feats = []
+        if s.c_s2:
+            f = s.down(s.stem(s2))
+            if f.shape[-2:] != hw: f = F.adaptive_avg_pool2d(f, hw)
+            feats += [f, s.cell_stats(s2, hw)]
+        if s.c_prior: feats.append(prior)
+        return s.ctx(s.mix(torch.cat(feats, 1)))
 
-class MonotoneGate(nn.Module):
-    def __init__(s, n_ch):
-        super().__init__(); s.raw = nn.Parameter(torch.full((n_ch,), -0.5))
-    def forward(s, h_days):
-        return torch.exp(-F.softplus(s.raw)[None] * (h_days[:, None] / 150.0))
 
 class DCNet(nn.Module):
-    def __init__(s, n_poll=1, full_hw=(123, 95), horizons=HORIZONS_DAYS, fine_ratio=8,
-                 dim=192, attn_layers=2, heads=6, p=0.1, use_B=True, use_s2=True, use_weather=True, so2_idx=2,
-                 long_mem_dropout=0.0):
+    def __init__(s, n_poll=1, horizons=HORIZONS_DAYS, L=12, n_wx=0, s2_ch=38, s2_ratio=8,
+                 use_s2=True, use_prior=True, use_weather=True, dim=160, n_tau=4, p=0.1, cu=96):
         super().__init__()
-        s.n_poll, s.horizons, s.use_B, s.use_s2, s.use_weather, s.so2_idx = n_poll, horizons, use_B, use_s2, use_weather, so2_idx
-        s.long_mem_dropout = long_mem_dropout
-        s.Q = len(horizons)
-        s.register_buffer("h_days", torch.tensor(horizons, dtype=torch.float32))
-        s.fast = FastEncoder(c_in=n_poll)
-        s.slow = S2SlowEncoder(c_in=32)
-        s.fine_head = FineDisaggregationHead(c_trunk=64, c_f1=24, n_poll=n_poll, p=p)
-        s.long = LongMemoryEncoder(c_in=12 * n_poll * 2)
-        n_cond = 2 + 2 * s.Q + (8 if use_weather else 0)
-        cond = 32
-        s.cal = nn.Sequential(nn.Linear(n_cond, cond), nn.SiLU(), nn.Linear(cond, cond))
-        s.fuse = nn.Conv2d(128 + 64 + 64, dim, 1)
-        s.film_b = FiLM(cond, dim)
-        s.attn = nn.ModuleList([RelPosAttnBlock(dim, heads, p) for _ in range(attn_layers)])
-        s.up3, s.ag3, s.dec3 = nn.Conv2d(dim, 128, 1), AttnGate(128, 64, 64), ResBlock(128 + 128, 128, 0.05)
-        s.up2, s.ag2, s.dec2 = nn.Conv2d(128, 64, 1), AttnGate(64, 64, 32), ResBlock(64 + 64, 64, 0.05)
-        s.up1, s.ag1, s.dec1 = nn.Conv2d(64, 32, 1), AttnGate(32, 64, 32), ResBlock(32 + 32, 32, 0.05)
-        s.film_d = FiLM(cond, 32)
-        s.mix_native = nn.Conv2d(32 + 64 + 64, 64, 3, padding=1, padding_mode="reflect")
-        s.head = nn.Conv2d(64, s.Q * n_poll * 3, 1)
-        s.occ = nn.Conv2d(64, s.Q, 1)
-        s.prior = SeasonalPrior(n_poll, *full_hw)
-        s.gate = MonotoneGate(n_poll)
-        s.Bhead = nn.Sequential(nn.Conv2d(64 + 64, 32, 3, padding=1, padding_mode="reflect"), nn.SiLU(),
-                                nn.Conv2d(32, n_poll, 1))
-        nn.init.zeros_(s.Bhead[-1].weight); nn.init.zeros_(s.Bhead[-1].bias)
-        nn.init.zeros_(s.head.bias)
+        P, Q = n_poll, len(horizons)
+        s.P, s.Q, s.L, s.horizons = P, Q, L, tuple(horizons)
+        s.use_s2, s.use_prior, s.use_weather = bool(use_s2), bool(use_prior), bool(use_weather and n_wx > 0)
+        s.n_wx = n_wx
+        # dynamics
+        s.stem = PartialStem(P, 16)
+        c_dyn = L * 16 + 12 * P * 2 + 3 * P
+        s.enc0 = nn.Sequential(nn.Conv2d(c_dyn, 64, 3, padding=1), ResBlock(64, 64, p))
+        s.down1, s.enc1 = nn.Conv2d(64, 96, 3, 2, 1), ResBlock(96, 96, p)
+        s.down2, s.enc2 = nn.Conv2d(96, 128, 3, 2, 1), ResBlock(128, 128, p)
+        # land use
+        s.has_lu = s.use_s2 or s.use_prior
+        cu = cu if s.has_lu else 0
+        s.cu = cu
+        if s.has_lu:
+            s.lu = LandUseEncoder(s2_ch if s.use_s2 else 0, (P + 1) if s.use_prior else 0, s2_ratio, cu)
+        # conditioning: calendar + weather history (origin and before only)
+        n_cond = 2 + (L * n_wx if s.use_weather else 0)
+        s.cond = nn.Sequential(nn.Linear(n_cond, 64), nn.SiLU(), nn.Linear(64, 64))
+        s.hcond = nn.Sequential(nn.Linear(64 + 3 + Q, 64), nn.SiLU(), nn.Linear(64, 64))
+        # translator
+        s.tin = nn.Conv2d(128 + cu, dim, 1)
+        s.film_t = FiLM(64, dim)
+        s.tau = nn.ModuleList([TAU(dim, p) for _ in range(n_tau)])
+        # per-horizon decoder
+        s.film_z = FiLM(64, dim)
+        s.up2, s.mod2, s.dec2, s.film2 = nn.Conv2d(dim, 96, 1), LUMod(192, cu), ResBlock(192, 96, p), FiLM(64, 96)
+        s.up1, s.mod1, s.dec1, s.film1 = nn.Conv2d(96, 64, 1), LUMod(128, cu), ResBlock(128, 64, p), FiLM(64, 64)
+        s.head = nn.Conv2d(64, 3 * P, 1)
+        with torch.no_grad():
+            s.head.weight.zero_(); s.head.bias.zero_()
+        s.occ = nn.Conv2d(64, 1, 1)
+        # damped anomaly persistence: alpha_h init exp(-h/15 d), learned per horizon x pollutant
+        h = torch.tensor(horizons, dtype=torch.float32)
+        a0 = torch.exp(-h / 15.0).clamp(1e-3, 0.999)
+        s.alpha_raw = nn.Parameter(torch.log(a0 / (1 - a0))[:, None].repeat(1, P).contiguous())
+        s.age_k = nn.Parameter(torch.zeros(P))
+        s.register_buffer("h_feat", torch.log(h / 5.0)[:, None] / math.log(24.0))
+        s.register_buffer("h_onehot", torch.eye(Q))
 
-    def forward(s, batch):
-        v, m = batch["fast_v"], batch["fast_m"]
-        s2, lm = batch["s2_slow"], batch["long_mem"]
-        crop, doy_tgt = batch["crop"], batch["doy_tgt"]
-        B = v.size(0)
+    def forward(s, b):
+        fa, fm = b["fast_a"], b["fast_m"]                                   # (B, L, P, H, W)
+        B, L, P, H, W = fa.shape
+        x = s.stem(fa.flatten(0, 1), fm.flatten(0, 1)).view(B, L * 16, H, W)
+        dyn = torch.cat([x, b["long_a"].flatten(1, 2), b["long_m"].flatten(1, 2), b["last_a"], b["has"], b["age"]], 1)
+        e0 = s.enc0(dyn); e1 = s.enc1(s.down1(e0)); e2 = s.enc2(s.down2(e1))
 
-        # Spatial / Historical Dropout on long_mem to prevent S2 shortcut
-        if s.training and s.long_mem_dropout > 0:
-            drop_mask = (torch.rand(B, 1, 1, 1, device=lm.device) >= s.long_mem_dropout).float()
-            lm = lm * drop_mask
+        u = s.lu(b.get("s2") if s.use_s2 else None, b.get("prior") if s.use_prior else None, (H, W)) if s.has_lu else None
 
-        cal_items = [batch["doy_org_sc"], torch.sin(2*math.pi*doy_tgt/365.25), torch.cos(2*math.pi*doy_tgt/365.25)]
-        if s.use_weather and "weather" in batch and batch["weather"] is not None:
-            cal_items.append(batch["weather"])
-        cal = s.cal(torch.cat(cal_items, 1))
+        c_items = [b["doy_org_sc"]]
+        if s.use_weather: c_items.append(b["wx"])
+        c = s.cond(torch.cat(c_items, 1))                                   # (B, 64)
 
-        f1, h2, h3, h4 = s.fast(v, m)
-        if s.use_s2: s1, s2f, s4f, s8f = s.slow(s2)
-        else:
-            H, W = v.shape[-2:]
-            s8f = v.new_zeros(B, 64, H, W); s4f = v.new_zeros(B, 48, 2*H, 2*W); s2f = v.new_zeros(B, 32, 4*H, 4*W)
-            s1 = v.new_zeros(B, 24, H, W)
-        lmf = s.long(lm)
-        s8_native = F.interpolate(s8f, size=f1.shape[-2:], mode="bilinear", align_corners=False)
-        s8_h2 = F.interpolate(s8f, size=h2.shape[-2:], mode="bilinear", align_corners=False)
-        s8_h3 = F.interpolate(s8f, size=h3.shape[-2:], mode="bilinear", align_corners=False)
-        z = s.fuse(torch.cat([h4, F.adaptive_avg_pool2d(s8f, h4.shape[-2:]), F.adaptive_avg_pool2d(lmf, h4.shape[-2:])], 1))
-        z = s.film_b(z, cal)
-        for blk in s.attn: z = blk(z)
-        d3 = s.up3(F.interpolate(z, size=h3.shape[-2:], mode="bilinear", align_corners=False))
-        d3 = s.dec3(torch.cat([d3, s.ag3(h3, s8_h3)], 1))
-        d2 = s.up2(F.interpolate(d3, size=h2.shape[-2:], mode="bilinear", align_corners=False))
-        d2 = s.dec2(torch.cat([d2, s.ag2(h2, s8_h2)], 1))
-        d1 = s.up1(F.interpolate(d2, size=f1.shape[-2:], mode="bilinear", align_corners=False))
-        d1 = s.dec1(torch.cat([d1, s.ag1(f1, s8_native)], 1))
-        d1 = s.film_d(d1, cal)
-        trunk = F.silu(s.mix_native(torch.cat([d1, s8_native, lmf], 1)))
-        out = s.head(trunk).view(B, s.Q, s.n_poll, 3, *trunk.shape[-2:])
-        a, wlo, whi = out[:, :, :, 0], F.softplus(out[:, :, :, 1]) + 1e-3, F.softplus(out[:, :, :, 2]) + 1e-3
-        prior = s.prior(doy_tgt, crop, trunk.shape[-2:])
-        g = s.gate(s.h_days)[None, :, :, None, None]
-        Bterm = s.Bhead(torch.cat([trunk, s8_native], 1))[:, None] if (s.use_B and s.use_s2) else 0.0
-        bscale = (1 - g)
-        med = prior + bscale * Bterm + g * a
+        z = s.tin(torch.cat([e2] + ([F.adaptive_avg_pool2d(u, e2.shape[-2:])] if u is not None else []), 1))
+        z = s.film_t(z, c)
+        for blk in s.tau: z = blk(z)
 
-        # Rank 1: High-Resolution Disaggregation & Fine-Scale Prediction
-        fine_mod = s.fine_head(trunk, s1) if s.use_s2 else torch.zeros(B, s.n_poll, *s1.shape[-2:], device=med.device)
-        med_up = F.interpolate(med.flatten(0, 1), size=s1.shape[-2:], mode="bilinear", align_corners=False).view(B, s.Q, s.n_poll, *s1.shape[-2:])
-        fine_q50 = med_up + fine_mod[:, None]
+        Q = s.Q
+        ang = 2 * math.pi * b["doy_tgt"] / 365.25                           # (B, Q)
+        hf = torch.cat([s.h_feat[None].expand(B, Q, 1), torch.sin(ang)[..., None], torch.cos(ang)[..., None],
+                        s.h_onehot[None].expand(B, Q, Q)], -1)
+        hc = s.hcond(torch.cat([c[:, None].expand(B, Q, c.size(-1)), hf], -1)).flatten(0, 1)   # (B*Q, 64)
+        rep = lambda t: t[:, None].expand(B, Q, *t.shape[1:]).flatten(0, 1)
+        uq = rep(u) if u is not None else None
 
-        return {"q50": med, "q10": med - wlo, "q90": med + whi, "fine_q50": fine_q50, "occ_logit": s.occ(trunk), "B": Bterm}
+        zq = s.film_z(rep(z), hc)
+        d2 = s.up2(F.interpolate(zq, size=e1.shape[-2:], mode="bilinear", align_corners=False))
+        d2 = s.film2(s.dec2(s.mod2(torch.cat([d2, rep(e1)], 1), uq)), hc)
+        d1 = s.up1(F.interpolate(d2, size=e0.shape[-2:], mode="bilinear", align_corners=False))
+        d1 = s.film1(s.dec1(s.mod1(torch.cat([d1, rep(e0)], 1), uq)), hc)
+        trunk = F.silu(d1)
 
-def masked_pinball(pred, target, mask, tau):
-    e = target - pred
-    l = torch.maximum(tau * e, (tau - 1) * e) * mask
-    return l.sum() / mask.sum().clamp(min=1.0)
+        out = s.head(trunk).view(B, Q, P, 3, H, W)
+        delta, wlo, whi = out[:, :, :, 0], out[:, :, :, 1], out[:, :, :, 2]
+        alpha = torch.sigmoid(s.alpha_raw)[None, :, :, None, None]                       # (1, Q, P, 1, 1)
+        decay = torch.exp(-F.softplus(s.age_k)[None, :, None, None] * b["age"])          # (B, P, H, W)
+        pers = alpha * (b["last_a"] * b["has"] * decay)[:, None]
+        base = b["clim_tgt"] + pers
+        q50 = base + delta
+        return {"q50": q50, "q10": q50 - F.softplus(wlo) - 1e-3, "q90": q50 + F.softplus(whi) + 1e-3,
+                "base": base, "occ_logit": s.occ(trunk).view(B, Q, H, W)}
 
-def dcnet_loss(out, y, ymask, so2_event=None, so2_idx=2, lam_grad=0.1, lam_peak=0.5, lam_B=1e-3, lam_occ=0.2,
-               lam_mass=0.1, peak_thr=None, hweights=None):
-    tot = 0.0
-    q50, q10, q90 = out["q50"], out["q10"], out["q90"]
-    n_poll = y.size(2)
-    w = 1.0
-    if peak_thr is not None:
-        peak_t = torch.as_tensor(peak_thr, dtype=y.dtype, device=y.device)
-        if peak_t.numel() == n_poll:
-            w = 1.0 + lam_peak * torch.sigmoid((y - peak_t[None, None, :, None, None]) / 0.25)
-    m = ymask * w
-    tot = tot + masked_pinball(q50, y, m, 0.5) + 0.5 * masked_pinball(q10, y, m, 0.1) + 0.5 * masked_pinball(q90, y, m, 0.9)
-    gx = lambda t: t[..., :, 1:] - t[..., :, :-1]
-    gy = lambda t: t[..., 1:, :] - t[..., :-1, :]
-    mx, my = ymask[..., :, 1:] * ymask[..., :, :-1], ymask[..., 1:, :] * ymask[..., :-1, :]
-    tot = tot + lam_grad * ((gx(q50) - gx(y)).abs() * mx).sum() / mx.sum().clamp(min=1) \
-                + lam_grad * ((gy(q50) - gy(y)).abs() * my).sum() / my.sum().clamp(min=1)
 
-    # Rank 1: Area-to-Point Mass Conservation Integral Loss (Late Pooling)
-    if "fine_q50" in out and out["fine_q50"] is not None:
-        fine_pred = out["fine_q50"]
-        coarse_pool = F.adaptive_avg_pool2d(fine_pred.flatten(0, 1), y.shape[-2:]).view_as(y)
-        mass_loss = ((coarse_pool - y).abs() * m).sum() / m.sum().clamp(min=1.0)
-        tot = tot + lam_mass * mass_loss
+# ----------------------------------------------------------------------------- loss
+def _per_h(num, den):
+    """mean over horizons that have targets of (num/den) per horizon; num, den: (Q,)"""
+    ok = den > 0
+    return (num[ok] / den[ok]).mean() if ok.any() else num.sum() * 0.0
 
-    if so2_event is not None and so2_idx is not None and so2_idx < n_poll:
-        mk = ymask[:, :, so2_idx]
-        bce = F.binary_cross_entropy_with_logits(out["occ_logit"], so2_event, reduction="none") * mk
+
+def dcnet_loss(out, b, so2_pos=None, lam_peak=0.5, lam_grad=0.05, lam_blob=0.2, lam_occ=0.2, tau_blob=0.1):
+    """Quantile loss (each horizon weighted equally) + hotspot-weighted pinball + gradient (edge) loss
+    + soft-Dice on hotspot exceedance (directly targets blob F1) + SO2 occurrence BCE."""
+    y, ym = b["y"], b["ym"]
+    thr = b["thr_tgt"][..., None, None]                                       # (B, Q, P, 1, 1)
+    w = ym * (1 + lam_peak * torch.sigmoid((y - thr) / 0.25))
+    red = (0, 2, 3, 4)
+    den = w.sum(red)
+
+    def pin(pred, tau):
+        e = y - pred
+        return _per_h((torch.maximum(tau * e, (tau - 1) * e) * w).sum(red), den)
+
+    q50 = out["q50"]
+    tot = pin(q50, 0.5) + 0.5 * pin(out["q10"], 0.1) + 0.5 * pin(out["q90"], 0.9)
+
+    mx, my = ym[..., :, 1:] * ym[..., :, :-1], ym[..., 1:, :] * ym[..., :-1, :]
+    gx = ((q50[..., :, 1:] - q50[..., :, :-1]) - (y[..., :, 1:] - y[..., :, :-1])).abs() * mx
+    gy = ((q50[..., 1:, :] - q50[..., :-1, :]) - (y[..., 1:, :] - y[..., :-1, :])).abs() * my
+    tot = tot + lam_grad * (_per_h(gx.sum(red), mx.sum(red)) + _per_h(gy.sum(red), my.sum(red)))
+
+    if lam_blob > 0:
+        sp = torch.sigmoid((q50 - thr) / tau_blob) * ym
+        so = (y > thr).float() * ym
+        inter, dsum = (sp * so).sum(red), sp.sum(red) + so.sum(red)
+        ok = ym.sum(red) > 0
+        dice = 1 - (2 * inter + 1) / (dsum + 1)
+        tot = tot + lam_blob * (dice[ok].mean() if ok.any() else dice.sum() * 0)
+
+    if so2_pos is not None and lam_occ > 0:
+        mk = ym[:, :, so2_pos]
+        bce = F.binary_cross_entropy_with_logits(out["occ_logit"], b["ev"], reduction="none") * mk
         tot = tot + lam_occ * bce.sum() / mk.sum().clamp(min=1)
-    if torch.is_tensor(out["B"]): tot = tot + lam_B * out["B"].abs().mean()
     return tot
+
 
 def count_params(m): return sum(p.numel() for p in m.parameters() if p.requires_grad)

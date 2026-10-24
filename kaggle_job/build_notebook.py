@@ -21,13 +21,11 @@ def main():
         "cell_type": "markdown",
         "metadata": {},
         "source": [
-            "# AirQ-CV: Dual-Clock Architecture & DC-Net GPU Training\n",
-            "### Automated Run Pipeline (Option B: Cloud GDrive Streaming -> GPU Cache -> Training -> Empirical Evaluation)\n",
-            "- **Target Pollutants**: NO2, CO, SO2 (`--poll all`) or NO2 only (`--poll NO2`)\n",
-            "- **Historical Shortcut Prevention**: 50% Spatial Dropout on `long_mem`\n",
-            "- **Spatial Prior**: Per-sample batch slicing across harmonic lookup tables\n",
-            "- **Temporal Split**: Stage 1 (2019–2023 Train, 2024 Held-Out Validation)\n",
-            "- **Benchmark Metric**: Physical empirical training pixel climatology (external yardstick)\n"
+            "# AirQ-CV Stage B: land-use-prior forecaster (DC-Net v2)\n",
+            "- S2 land use (annual + seasonal bands, NDBI/NDVI/MNDWI/NDRE/BSI, context pyramid) + Stage A OOF prior + S5P anomaly history + ERA5 history\n",
+            "- Forecast of future S5P composites at **5, 10, 15, 30, 60, 120 days** (Rule.md section 7)\n",
+            "- Output = harmonic climatology + damped anomaly persistence + network residual; quantiles q10/q50/q90\n",
+            "- Split: train 2019-2023, validate 2024; metrics = skill vs climatology/persistence, SSIM, hotspot blobs\n"
         ]
     })
 
@@ -220,19 +218,32 @@ def main():
         "metadata": {},
         "outputs": [],
         "source": [
-            "# MODE: 'landuse' = Rule.md Stage A (S2-only -> S5P mean column, spatial block CV); 'dcnet' = temporal DC-Net forecaster\n",
-            "MODE = 'landuse'\n",
+            "# MODE: 'landuse' = Rule.md Stage A (spatial land-use baseline); 'dcnet' = Stage B forecaster (Rule.md section 7)\n",
+            "MODE = 'dcnet'\n",
+            "EPOCHS = 40          # early stopping (patience 10) on mean validation skill vs climatology\n",
+            "POLL = 'all'         # 'all' = NO2+CO+SO2 joint model, or 'NO2' / 'CO' / 'SO2'\n",
+            "ABLATE_B = False     # True: also train Config B (no S2, no prior) to measure what land use adds (doubles run time)\n",
+            "SEEDS = [0]          # e.g. [0, 1, 2] -> seed ensemble in evaluate.py (better metrics, 3x run time)\n",
+            "RUN = '/kaggle/working/runs'\n",
+            "PRIOR_DIR = '/kaggle/working/priors'\n",
+            "AUX_DIR = CACHE_DIR if os.access(CACHE_DIR, os.W_OK) else '/kaggle/tmp/aux'\n",
+            "CONFIGS = ['C'] + (['B'] if ABLATE_B else [])\n",
+            "OUT = f'{RUN}/dcnet_{POLL}_C_s{SEEDS[0]}'\n",
             "print('=== CACHE AUDIT (valid-pixel coverage, finiteness) ===')\n",
             "!python check_cache.py --cache {CACHE_DIR} --csv /kaggle/working/cache_audit.csv\n",
             "if MODE == 'landuse':\n",
             "    print('=== STAGE A: LAND-USE-INFERRED POLLUTION (S2 only, no time/weather/S5P inputs) ===')\n",
             "    !python -u landuse_baseline.py --cache {CACHE_DIR} --out /kaggle/working/runs/landuse --poll NO2 --cnn 1 --blocks 8,4,16\n",
-            "EPOCHS = 3  # DC-Net smoke test. Set to 120 for the full run.\n",
-            "POLL = 'all'  # 'all' = NO2+CO+SO2 joint model, 'NO2' = single-pollutant baseline\n",
-            "OUT = f'/kaggle/working/runs/dcnet_{POLL}'\n",
             "if MODE == 'dcnet':\n",
-            "    print(f'=== STEP 2: TRAINING DC-NET (STAGE 1, POLL={POLL}, {EPOCHS} epochs, single GPU) ===')\n",
-            "    !python -u train.py --cache {CACHE_DIR} --out {OUT} --stage 1 --poll {POLL} --long_mem_dropout 0.50 --batch 8 --epochs {EPOCHS} --workers 2 --vram_cap 0.90 --no_dp\n"
+            "    print('=== STAGE B-1: OUT-OF-FOLD LAND-USE PRIOR MAPS (S2 only, target years 2019-2023 = training period) ===')\n",
+            "    for _p, _lt in (('NO2', 1), ('CO', 1), ('SO2', 0)):\n",
+            "        if POLL in ('all', _p):\n",
+            "            !python -u landuse_baseline.py --cache {CACHE_DIR} --out {PRIOR_DIR} --poll {_p} --y0 2019 --y1 2023 --prior_only 1 --prior_block 8 --log_target {_lt}\n",
+            "    for _cfg in CONFIGS:\n",
+            "        for _sd in SEEDS:\n",
+            "            print(f'=== STAGE B-2: TRAIN config {_cfg} seed {_sd} ({EPOCHS} epochs max) ===')\n",
+            "            _out = f'{RUN}/dcnet_{POLL}_{_cfg}_s{_sd}'\n",
+            "            !python -u train.py --cache {CACHE_DIR} --out {_out} --config {_cfg} --poll {POLL} --prior_dir {PRIOR_DIR} --aux_dir {AUX_DIR} --epochs {EPOCHS} --seed {_sd} --workers 4 --no_dp\n"
         ]
     })
 
@@ -244,8 +255,10 @@ def main():
         "outputs": [],
         "source": [
             "if MODE == 'dcnet':\n",
-            "    print('=== STEP 3: RUNNING EMPIRICAL CLIMATOLOGY EVALUATION (2024 VAL SPLIT) ===')\n",
-            "    !python evaluate.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --split val --out {OUT}\n"
+            "    for _cfg in CONFIGS:\n",
+            "        _ck = ','.join(f'{RUN}/dcnet_{POLL}_{_cfg}_s{_sd}/best.pt' for _sd in SEEDS)\n",
+            "        print(f'=== STAGE B-3: EVALUATE config {_cfg} on the 2024 validation year ===')\n",
+            "        !python -u evaluate.py --ckpt {_ck} --cache {CACHE_DIR} --split val --out {RUN}/eval_{POLL} --tag {_cfg}\n"
         ]
     })
 
@@ -260,17 +273,22 @@ def main():
             "if MODE == 'landuse':\n",
             "    for f_ in sorted(glob.glob('/kaggle/working/runs/landuse/*.csv')):\n",
             "        print('\\n' + '='*80 + '\\n' + f_ + '\\n' + '='*80); print(pd.read_csv(f_).to_string(index=False))\n",
-            "metrics_path = f'{OUT}/dcnet_val_metrics.csv'\n",
-            "if MODE != 'dcnet':\n",
-            "    pass\n",
-            "elif os.path.exists(metrics_path):\n",
-            "    df = pd.read_csv(metrics_path)\n",
-            "    print('\\n' + '='*80)\n",
-            "    print('FINAL EVALUATION METRICS (2024 HELD-OUT SPLIT):')\n",
-            "    print('='*80)\n",
-            "    print(df[['pollutant', 'horizon_days', 'R2', 'pearson_r', 'skill_vs_clim_pct', 'coverage_80', 'csi_p90']].to_string())\n",
-            "else:\n",
-            "    print('Metrics file not found.')\n"
+            "if MODE == 'dcnet':\n",
+            "    from IPython.display import Image, display\n",
+            "    _ev = f'{RUN}/eval_{POLL}'\n",
+            "    _m = {c: pd.read_csv(f'{_ev}/dcnet_val_metrics_{c}.csv') for c in CONFIGS if os.path.exists(f'{_ev}/dcnet_val_metrics_{c}.csv')}\n",
+            "    for c, d in _m.items():\n",
+            "        print('\\n' + '='*100 + f'\\nCONFIG {c} - 2024 validation (all valid pixels)\\n' + '='*100)\n",
+            "        print(d[d.region == 'all'][['pollutant', 'horizon_days', 'SS_clim', 'SS_clim_lo', 'SS_clim_hi', 'SS_pers', 'anomaly_r', 'R2', 'R2_climatology', 'SSIM', 'CSI_p90', 'coverage_80']].to_string(index=False, float_format=lambda v: f'{v:.3f}'))\n",
+            "        _b = pd.read_csv(f'{_ev}/dcnet_val_blobs_{c}.csv')\n",
+            "        print('\\nhotspot blobs:'); print(_b.to_string(index=False, float_format=lambda v: f'{v:.3f}'))\n",
+            "        for _f in [f'{_ev}/summary_val_{c}.png'] + sorted(glob.glob(f'{_ev}/panels_*_val_{c}.png')):\n",
+            "            if os.path.exists(_f): display(Image(_f))\n",
+            "    if 'C' in _m and 'B' in _m:\n",
+            "        _j = _m['C'].merge(_m['B'], on=['pollutant', 'horizon_days', 'region'], suffixes=('_C', '_B'))\n",
+            "        _j['land_use_gain'] = _j['SS_clim_C'] - _j['SS_clim_B']\n",
+            "        print('\\n=== LAND-USE CONTRIBUTION (Config C - Config B, SS_clim) ===')\n",
+            "        print(_j[['pollutant', 'horizon_days', 'region', 'SS_clim_C', 'SS_clim_B', 'land_use_gain']].to_string(index=False, float_format=lambda v: f'{v:+.3f}'))\n"
         ]
     })
 
