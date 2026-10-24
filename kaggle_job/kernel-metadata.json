@@ -1,0 +1,16 @@
+{
+  "id": "antonioroger2/dcnet-dual-clock-training",
+  "title": "DCNet Dual Clock Training",
+  "code_file": "kaggle_dcnet_run.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_gpu": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "adarshpradeep17/airq-dualclock-cache"
+  ],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}

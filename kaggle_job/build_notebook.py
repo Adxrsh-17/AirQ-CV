@@ -132,31 +132,85 @@ def main():
         ]
     })
 
-    # Cell 6: Run make_cache.py
+    # Cell 6: Build or Detect Cache in /kaggle/tmp (~60 GB ephemeral storage)
     cells.append({
         "cell_type": "code",
         "execution_count": None,
         "metadata": {},
         "outputs": [],
         "source": [
-            "print('=== STEP 1: BUILDING SATELLITE & WEATHER CACHE ===')\n",
-            "!python make_cache.py --s2_dir data2/s2_composites --s5p_dir data2/s5p_composites --out cache --weather weather/era5_tn_clusters.csv --start 2019-01-01 --end 2024-12-31 --zero_is_invalid 1\n"
+            "import os, glob\n",
+            "print('=== STEP 1: RESOLVING HIGH-RES SATELLITE & WEATHER CACHE ===')\n",
+            "\n",
+            "# 1. Check if high-res cache is mounted directly from Kaggle Datasets (Instant & 0 disk usage)\n",
+            "mounted_cache = None\n",
+            "for root, dirs, files in os.walk('/kaggle/input'):\n",
+            "    if 's2_month.npy' in files and 'meta.json' in files:\n",
+            "        mounted_cache = root\n",
+            "        break\n",
+            "\n",
+            "if mounted_cache:\n",
+            "    print(f'Mounted Kaggle Dataset cache detected at: {mounted_cache}! (Zero disk usage)')\n",
+            "    CACHE_DIR = mounted_cache\n",
+            "else:\n",
+            "    # Use ephemeral /kaggle/tmp (~60 GB available, keeping /kaggle/working 100% clean)\n",
+            "    CACHE_DIR = '/kaggle/tmp/cache' if os.path.exists('/kaggle/tmp') else '/tmp/cache'\n",
+            "    os.makedirs(CACHE_DIR, exist_ok=True)\n",
+            "    print(f'Building high-res aligned cache in {CACHE_DIR} (ephemeral ~60 GB storage)...')\n",
+            "    !python make_cache.py --s2_dir data2/s2_composites --s5p_dir data2/s5p_composites --out {CACHE_DIR} --s2_ratio 32 --weather weather/era5_tn_clusters.csv --start 2019-01-01 --end 2024-12-31 --zero_is_invalid 1\n",
+            "    print('Cache build completed in temporary storage!')\n"
         ]
     })
 
-    # Cell 7: Run train.py
+    # Cell 7: Save Cache to Kaggle Datasets Once and For All
     cells.append({
         "cell_type": "code",
         "execution_count": None,
         "metadata": {},
         "outputs": [],
         "source": [
-            "print('=== STEP 2: TRAINING DC-NET ON GPU (STAGE 1, NO2 FOCUS) ===')\n",
-            "!python train.py --cache cache --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs 120 --vram_cap 0.90\n"
+            "import os, json\n",
+            "print('=== STEP 1B: PERSIST CACHE AS PERMANENT KAGGLE DATASET (ONCE AND FOR ALL) ===')\n",
+            "\n",
+            "# Only publish if cache was freshly created in temporary storage\n",
+            "if not mounted_cache and os.path.exists(os.path.join(CACHE_DIR, 'meta.json')):\n",
+            "    print('Setting up Kaggle credentials for antonioroger2...')\n",
+            "    kaggle_dir = os.path.expanduser('~/.kaggle')\n",
+            "    os.makedirs(kaggle_dir, exist_ok=True)\n",
+            "    kaggle_creds = {'username': 'antonioroger2', 'key': '375c60033dbfbfe213d2b3645e05814c'}\n",
+            "    with open(os.path.join(kaggle_dir, 'kaggle.json'), 'w') as f:\n",
+            "        json.dump(kaggle_creds, f)\n",
+            "    os.chmod(os.path.join(kaggle_dir, 'kaggle.json'), 0o600)\n",
+            "\n",
+            "    metadata = {\n",
+            "        'title': 'AirQ Dual-Clock High-Res Cache',\n",
+            "        'id': 'antonioroger2/airq-dualclock-highres-cache',\n",
+            "        'licenses': [{'name': 'CC0-1.0'}]\n",
+            "    }\n",
+            "    with open(os.path.join(CACHE_DIR, 'dataset-metadata.json'), 'w') as f:\n",
+            "        json.dump(metadata, f, indent=2)\n",
+            "\n",
+            "    print('Uploading cache as permanent Kaggle Dataset (antonioroger2/airq-dualclock-highres-cache)...')\n",
+            "    !kaggle datasets create -p {CACHE_DIR} --dir-mode zip || kaggle datasets version -p {CACHE_DIR} -m 'High-res Rank 1 cache (R=32)' --dir-mode zip\n",
+            "    print('\\nSUCCESS: Cache published permanently! You can now attach antonioroger2/airq-dualclock-highres-cache to any notebook for instant 0-second mount.')\n",
+            "else:\n",
+            "    print('Cache already mounted from Kaggle Datasets or previously published. Skipping upload.')\n"
         ]
     })
 
-    # Cell 8: Run evaluate.py
+    # Cell 8: Run train.py on 2x GPUs with DataParallel & AMP
+    cells.append({
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": [
+            "print('=== STEP 2: TRAINING DC-NET ON 2x T4 GPUs (STAGE 1, NO2 FOCUS) ===')\n",
+            "!python train.py --cache {CACHE_DIR} --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs 120 --vram_cap 0.90\n"
+        ]
+    })
+
+    # Cell 9: Run evaluate.py
     cells.append({
         "cell_type": "code",
         "execution_count": None,
@@ -164,7 +218,7 @@ def main():
         "outputs": [],
         "source": [
             "print('=== STEP 3: RUNNING EMPIRICAL CLIMATOLOGY EVALUATION (2024 HELD-OUT) ===')\n",
-            "!python evaluate.py --ckpt /kaggle/working/runs/dcnet_main/best.pt --cache cache --split val --out /kaggle/working/runs/dcnet_main\n"
+            "!python evaluate.py --ckpt /kaggle/working/runs/dcnet_main/best.pt --cache {CACHE_DIR} --split val --out /kaggle/working/runs/dcnet_main\n"
         ]
     })
 

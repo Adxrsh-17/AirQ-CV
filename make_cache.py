@@ -63,14 +63,20 @@ def main(a):
     print(f"[Cache Pre-Flight] S5P Grid: ({H5}, {W5}) | S2 Ratio: {R_use}x | High-Res S2 Grid: ({H8}, {W8})")
     print(f"[Cache Pre-Flight] Target s2_month.npy: {est_gb:.2f} GB ({est_bytes / (1024**2):.1f} MB)")
 
-    if est_gb > 14.0 and not getattr(a, "force_large_cache", False):
+    out_abs = os.path.abspath(a.out)
+    is_tmp_storage = ("/tmp" in out_abs)
+    safe_disk_limit = 55.0 if is_tmp_storage else 14.0
+    storage_type = "ephemeral /kaggle/tmp (~60 GB available)" if is_tmp_storage else "standard /kaggle/working (20 GB quota)"
+
+    if est_gb > safe_disk_limit and not getattr(a, "force_large_cache", False):
         raise RuntimeError(
-            f"Calculated cache size ({est_gb:.2f} GB) exceeds Kaggle's safe disk limit (~14 GB in /kaggle/working). "
-            f"Grid ({H5}x{W5}) with R={R_use} creates {H8}x{W8} ({H8*W8:,} pixels) per month. "
+            f"Calculated cache size ({est_gb:.2f} GB) exceeds safe disk limit ({safe_disk_limit} GB) for {storage_type}. "
+            f"Grid ({H5}x{W5}) with R={R_use} creates {H8}x{W8} ({H8*W8:,} pixels) per month.\n"
             f"Solutions:\n"
-            f"  1. For state-wide grids, use --s2_ratio 12 (~2.9 GB, matching native 500m S2 export);\n"
-            f"  2. For high-res urban study (100m native), pass --roi chennai with --s2_ratio 32 (only ~300 MB);\n"
-            f"  3. To bypass this guard if disk allows, add --force_large_cache 1."
+            f"  1. Use ephemeral storage: --out /kaggle/tmp/cache (up to ~60 GB available space);\n"
+            f"  2. For state-wide grids, use --s2_ratio 12 (~2.9 GB, matching native 500m S2 export);\n"
+            f"  3. For high-res urban study, pass --roi chennai with --s2_ratio 32 (only ~300 MB);\n"
+            f"  4. To bypass this guard if disk allows, add --force_large_cache 1."
         )
 
     s2m = np.lib.format.open_memmap(os.path.join(a.out, "s2_month.npy"), "w+", np.float16, (M, 12, H8, W8))
