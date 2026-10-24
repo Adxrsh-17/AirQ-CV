@@ -8,8 +8,7 @@
   "enable_gpu": true,
   "enable_internet": true,
   "dataset_sources": [
-    "adarshpradeep17/tamil-nadu-sentinel2-sentinel5p-airquality",
-    "adarshpradeep17/airq-dualclock-cache"
+    "adarshpradeep17/tamil-nadu-sentinel2-sentinel5p-airquality"
   ],
   "competition_sources": [],
   "kernel_sources": [],

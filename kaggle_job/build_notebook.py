@@ -267,9 +267,12 @@ def main():
         "metadata": {},
         "outputs": [],
         "source": [
-            "print('=== STEP 4: LAUNCHING INTERACTIVE GRADIO DASHBOARD SERVICE ===')\n",
-            "print('Opening public tunnel... Access the interactive dashboard via the gradio.live URL below:')\n",
-            "!python app.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --share\n"
+            "LAUNCH_APP = False  # the Gradio server never exits, so a batch (push) run would hang until the Kaggle time limit\n",
+            "if LAUNCH_APP:\n",
+            "    print('=== STEP 4: LAUNCHING INTERACTIVE GRADIO DASHBOARD SERVICE ===')\n",
+            "    !python app.py --ckpt {OUT}/best.pt --cache {CACHE_DIR} --share\n",
+            "else:\n",
+            "    print('Skipping dashboard (LAUNCH_APP=False). Run training/eval outputs are in', OUT)\n"
         ]
     })
 
