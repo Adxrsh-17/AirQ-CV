@@ -82,31 +82,42 @@ def main(a):
 
     torch.manual_seed(a.seed); np.random.seed(a.seed)
 
-    # Hardware Safety Rails (RTX 4060 Laptop GPU Protection)
+    # Hardware Safety Rails (Multi-GPU & Laptop Protection)
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     if torch.cuda.is_available():
-        torch.cuda.set_per_process_memory_fraction(a.vram_cap)
+        for d_idx in range(num_gpus):
+            torch.cuda.set_per_process_memory_fraction(a.vram_cap, device=d_idx)
         torch.cuda.empty_cache()
-        print(f"[Hardware Guard] VRAM fraction capped at {a.vram_cap*100:.0f}% (~{8.0*a.vram_cap:.1f} GB max).")
+        print(f"[Hardware Guard] {num_gpus} GPU(s) detected. Per-device VRAM fraction capped at {a.vram_cap*100:.0f}%.")
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     tr = DCDataset(a.cache, "train", cfg)
     va = DCDataset(a.cache, "val", cfg, tr.norm, tr.s2_stats, tr.wx_norm)
     tl = DataLoader(tr, cfg["batch"], num_workers=a.workers, collate_fn=collate, drop_last=True, persistent_workers=(a.workers > 0))
     vl = DataLoader(va, 1, num_workers=0, collate_fn=collate)
-    model = DCNet(tr.n_poll, (tr.H5, tr.W5), use_B=bool(a.use_B), use_s2=bool(a.use_s2),
-                  use_weather=bool(a.use_weather), long_mem_dropout=cfg.get("long_mem_dropout", 0.0)).to(dev)
+    raw_model = DCNet(tr.n_poll, (tr.H5, tr.W5), use_B=bool(a.use_B), use_s2=bool(a.use_s2),
+                      use_weather=bool(a.use_weather), long_mem_dropout=cfg.get("long_mem_dropout", 0.0)).to(dev)
+    use_dp = (dev == "cuda" and num_gpus > 1 and not getattr(a, "no_dp", False))
+    if use_dp:
+        print(f"[Multi-GPU] Initializing torch.nn.DataParallel across {num_gpus} GPUs: {[torch.cuda.get_device_name(i) for i in range(num_gpus)]}")
+        print(f"            Global batch: {cfg['batch']} ({cfg['batch'] // num_gpus} per GPU).")
+        model = torch.nn.DataParallel(raw_model)
+    else:
+        model = raw_model
+
     print(f"DC-Net initialized on {dev} ({torch.cuda.get_device_name(0) if dev=='cuda' else 'CPU'}):")
-    print(f"  Params: {count_params(model):,}")
+    print(f"  Params: {count_params(raw_model):,}")
     print(f"  Target Pollutants: {tr.n_poll} ({'NO2' if tr.n_poll==1 else 'NO2, CO, SO2'})")
     print(f"  Long-Mem Dropout: {cfg.get('long_mem_dropout', 0.0):.2f}")
     print(f"  Temporal Splits ({a.stage}): Train {cfg['splits']['train']}, Val {cfg['splits']['val']}, Test {cfg['splits']['test']}")
     print(f"  Weather Augmented: {bool(a.use_weather)}")
     print(f"  Structural Shift B: {bool(a.use_B)}")
     print(f"  Slow S2 Encoder: {bool(a.use_s2)}")
+    print(f"  Multi-GPU DataParallel: {use_dp} ({num_gpus} devices)")
 
-    ema = copy.deepcopy(model).eval()
-    nd = [p for n, p in model.named_parameters() if p.ndim <= 1 or n.startswith("prior.W")]
-    dd = [p for n, p in model.named_parameters() if not (p.ndim <= 1 or n.startswith("prior.W"))]
+    ema = copy.deepcopy(raw_model).eval()
+    nd = [p for n, p in raw_model.named_parameters() if p.ndim <= 1 or "prior.W" in n]
+    dd = [p for n, p in raw_model.named_parameters() if not (p.ndim <= 1 or "prior.W" in n)]
     opt = torch.optim.AdamW([dict(params=dd, weight_decay=cfg["wd"]), dict(params=nd, weight_decay=0.0)], lr=cfg["lr"])
     iters = cfg["samples_per_epoch"] // cfg["batch"]; total = iters * cfg["epochs"]; step = 0
     sched = lambda s: min(1, (s + 1) / (cfg["warmup"] * iters)) * 0.5 * (1 + math.cos(math.pi * min(1, s / total)))
@@ -116,19 +127,19 @@ def main(a):
     os.makedirs(a.out, exist_ok=True); best, bad = 1e9, 0
 
     for ep in range(cfg["epochs"]):
-        model.train(); run = 0.0
+        model.train(); raw_model.train(); run = 0.0
         for b in tl:
             for g in opt.param_groups: g["lr"] = cfg["lr"] * sched(step)
             b = to_dev(b, dev)
-            with torch.autocast(dev, dtype=torch.float16, enabled=amp):
+            with torch.cuda.amp.autocast(enabled=amp):
                 o = model(model_in(b))
             o = {k: (v.float() if torch.is_tensor(v) else v) for k, v in o.items()}
             loss = dcnet_loss(o, b["y"], b["ym"], b["ev"], peak_thr=peak)
             opt.zero_grad(set_to_none=True); scaler.scale(loss).backward(); scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["clip"]); scaler.step(opt); scaler.update(); step += 1; run += loss.item()
+            torch.nn.utils.clip_grad_norm_(raw_model.parameters(), cfg["clip"]); scaler.step(opt); scaler.update(); step += 1; run += loss.item()
             with torch.no_grad():
                 d = min(cfg["ema"], (1 + step) / (10 + step))
-                for pe, pm in zip(ema.parameters(), model.parameters()): pe.mul_(d).add_(pm.detach(), alpha=1 - d)
+                for pe, pm in zip(ema.parameters(), raw_model.parameters()): pe.mul_(d).add_(pm.detach(), alpha=1 - d)
 
         vloss, r2, cov = evaluate(ema, vl, dev, peak, n_poll=tr.n_poll)
         if tr.n_poll == 1:
@@ -172,4 +183,5 @@ if __name__ == "__main__":
     ap.add_argument("--poll", default="NO2", choices=["NO2", "all"])
     ap.add_argument("--n_poll", type=int, default=1)
     ap.add_argument("--long_mem_dropout", type=float, default=0.5)
+    ap.add_argument("--no_dp", action="store_true", help="Disable DataParallel even if multi-GPU is available")
     main(ap.parse_args())

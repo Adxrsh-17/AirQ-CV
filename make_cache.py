@@ -18,11 +18,27 @@ def main(a):
     W = windows(a.start, a.end); T = len(W)
     ref = next(os.path.join(a.s5p_dir, f) for f in sorted(os.listdir(a.s5p_dir)) if f.startswith("s5p_2"))
     tf, H5, W5, crs = s5p_grid(ref)
+    win = None
+
+    if getattr(a, "roi", None) == "chennai":
+        bbox = [79.95, 12.80, 80.45, 13.30]
+        with rasterio.open(ref) as s:
+            w = rasterio.windows.from_bounds(*bbox, transform=s.transform).round_offsets().round_shape()
+            c_off = max(0, min(int(w.col_off), s.width - 1))
+            r_off = max(0, min(int(w.row_off), s.height - 1))
+            w_w = min(int(w.width), s.width - c_off)
+            w_h = min(int(w.height), s.height - r_off)
+            win = rasterio.windows.Window(c_off, r_off, w_w, w_h)
+            tf = rasterio.windows.transform(win, s.transform)
+            H5, W5 = w_h, w_w
+            print(f"[ROI Active: Chennai] Cropped S5P grid to ({H5}, {W5}) from bbox {bbox}.")
+
     val = np.zeros((T, 3, H5, W5), np.float32); msk = np.zeros((T, 3, H5, W5), np.uint8)
     for i, w in enumerate(tqdm(W, desc="S5P")):
         p = os.path.join(a.s5p_dir, f"s5p_{w:%Y%m%d}.tif")
         if not os.path.exists(p): continue
-        with rasterio.open(p) as s: x = s.read().astype(np.float32)[:, :H5, :W5]
+        with rasterio.open(p) as s:
+            x = s.read(window=win).astype(np.float32)[:, :H5, :W5] if win else s.read().astype(np.float32)[:, :H5, :W5]
         ok = np.isfinite(x) & (x > 0 if a.zero_is_invalid else True)
         val[i, :, :x.shape[1], :x.shape[2]] = np.where(ok, x, 0); msk[i, :, :x.shape[1], :x.shape[2]] = ok
     months = pd.period_range(W[0], W[-1], freq="M"); M = len(months)
@@ -31,8 +47,32 @@ def main(a):
     for m in range(M):
         ii = np.where(mon_of == m)[0]; c = msk[ii].sum(0)
         s5m[m] = (val[ii] * msk[ii]).sum(0) / np.maximum(c, 1); s5ok[m] = c > 0
-    R_use = getattr(a, "s2_ratio", R) or R
+
+    # Smart Resolution Selection & Cache Footprint Guard
+    is_state_wide = (H5 > 25 or W5 > 25)
+    if a.s2_ratio is not None and a.s2_ratio > 0:
+        R_use = a.s2_ratio
+    else:
+        # Full-state Tamil Nadu raw S2 export is ~590m native -> R=12 preserves 100% of spatial data within ~2.9 GB.
+        # Focused ROI (e.g. Chennai 13x13) has 100m native S2 -> R=32 yields ~300 MB.
+        R_use = 12 if is_state_wide else 32
+
     H8, W8 = H5 * R_use, W5 * R_use
+    est_bytes = M * 12 * H8 * W8 * 2  # float16
+    est_gb = est_bytes / (1024 ** 3)
+    print(f"[Cache Pre-Flight] S5P Grid: ({H5}, {W5}) | S2 Ratio: {R_use}x | High-Res S2 Grid: ({H8}, {W8})")
+    print(f"[Cache Pre-Flight] Target s2_month.npy: {est_gb:.2f} GB ({est_bytes / (1024**2):.1f} MB)")
+
+    if est_gb > 14.0 and not getattr(a, "force_large_cache", False):
+        raise RuntimeError(
+            f"Calculated cache size ({est_gb:.2f} GB) exceeds Kaggle's safe disk limit (~14 GB in /kaggle/working). "
+            f"Grid ({H5}x{W5}) with R={R_use} creates {H8}x{W8} ({H8*W8:,} pixels) per month. "
+            f"Solutions:\n"
+            f"  1. For state-wide grids, use --s2_ratio 12 (~2.9 GB, matching native 500m S2 export);\n"
+            f"  2. For high-res urban study (100m native), pass --roi chennai with --s2_ratio 32 (only ~300 MB);\n"
+            f"  3. To bypass this guard if disk allows, add --force_large_cache 1."
+        )
+
     s2m = np.lib.format.open_memmap(os.path.join(a.out, "s2_month.npy"), "w+", np.float16, (M, 12, H8, W8))
     s2ok = np.lib.format.open_memmap(os.path.join(a.out, "s2_month_ok.npy"), "w+", np.uint8, (M, H8, W8))
 
@@ -119,7 +159,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--s2_dir"); ap.add_argument("--s5p_dir"); ap.add_argument("--out")
     ap.add_argument("--weather", default=None)
-    ap.add_argument("--s2_ratio", type=int, default=R, help="S2 subgrid ratio per S5P cell (default 32 for ~150m, 40 for ~100m native)")
+    ap.add_argument("--s2_ratio", type=int, default=0, help="S2 subgrid ratio per S5P cell (0=auto: 32 for Chennai ROI ~300MB, 12 for full TN ~2.9GB)")
+    ap.add_argument("--roi", default="none", choices=["none", "chennai"], help="Crop ROI region (e.g. 'chennai' for high-res urban study)")
+    ap.add_argument("--force_large_cache", type=int, default=0, help="Bypass the 14GB safety check if disk space allows")
     ap.add_argument("--start", default="2019-01-01"); ap.add_argument("--end", default="2024-12-31")
     ap.add_argument("--zero_is_invalid", type=int, default=1)
     main(ap.parse_args())
