@@ -53,9 +53,9 @@ def main(a):
     if a.s2_ratio is not None and a.s2_ratio > 0:
         R_use = a.s2_ratio
     else:
-        # Full-state Tamil Nadu raw S2 export is ~590m native -> R=12 preserves 100% of spatial data within ~2.9 GB.
+        # Full-state Tamil Nadu raw S2 export is ~600m native (1023x780) -> R=8 preserves 100% of spatial data 1:1 without artificial interpolation (~1.2 GB).
         # Focused ROI (e.g. Chennai 13x13) has 100m native S2 -> R=32 yields ~300 MB.
-        R_use = 12 if is_state_wide else 32
+        R_use = 8 if is_state_wide else 32
 
     H8, W8 = H5 * R_use, W5 * R_use
     est_bytes = M * 12 * H8 * W8 * 2  # float16
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     ap.add_argument("--s2_dir"); ap.add_argument("--s5p_dir"); ap.add_argument("--out")
     ap.add_argument("--weather", default=None)
     ap.add_argument("--workers", type=int, default=4, help="Number of CPU worker threads for raster alignment (default 4)")
-    ap.add_argument("--s2_ratio", type=int, default=0, help="S2 subgrid ratio per S5P cell (0=auto: 32 for Chennai ROI ~300MB, 12 for full TN ~2.9GB)")
+    ap.add_argument("--s2_ratio", type=int, default=0, help="S2 subgrid ratio per S5P cell (0=auto: 32 for Chennai ROI ~300MB, 8 for full TN ~1.2GB native 600m 1:1)")
     ap.add_argument("--roi", default="none", choices=["none", "chennai"], help="Crop ROI region (e.g. 'chennai' for high-res urban study)")
     ap.add_argument("--force_large_cache", type=int, default=0, help="Bypass the 14GB safety check if disk space allows")
     ap.add_argument("--start", default="2019-01-01"); ap.add_argument("--end", default="2024-12-31")

@@ -155,12 +155,12 @@ size_ch_mb = size_ch_bytes / (1024 ** 2)
 print(f"  Chennai ROI (13x13, R=32): {size_ch_mb:.1f} MB (Target: < 500 MB)")
 assert size_ch_mb < 500.0, f"Chennai cache too large: {size_ch_mb} MB"
 
-# Scenario B: Tamil Nadu State Grid (123x95) at safe R=12 (native ~500m S2)
-H5_tn, W5_tn, R_tn_safe = 123, 95, 12
-size_tn_bytes = M * 12 * (H5_tn * R_tn_safe) * (W5_tn * R_tn_safe) * 2
+# Scenario B: Tamil Nadu State Grid (123x95) at native 1:1 R=8 (exact 600m raw S2 match)
+H5_tn, W5_tn, R_tn_native = 123, 95, 8
+size_tn_bytes = M * 12 * (H5_tn * R_tn_native) * (W5_tn * R_tn_native) * 2
 size_tn_gb = size_tn_bytes / (1024 ** 3)
-print(f"  Full Tamil Nadu (123x95, R=12): {size_tn_gb:.2f} GB (Target: < 5 GB)")
-assert size_tn_gb < 5.0, f"TN safe cache too large: {size_tn_gb} GB"
+print(f"  Full Tamil Nadu (123x95, R=8 native 1:1): {size_tn_gb:.2f} GB (Target: ~1.2 GB)")
+assert size_tn_gb < 2.0, f"TN native cache unexpectedly large: {size_tn_gb} GB"
 
 # Scenario C: What happened when R=32 was attempted on full state:
 H5_tn, W5_tn, R_tn_unsafe = 123, 95, 32

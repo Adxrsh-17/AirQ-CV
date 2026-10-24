@@ -3,7 +3,7 @@ import numpy as np, rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import Affine
 
-R = 32   # S2 sub-pixels per S5P cell, per axis (~150m high-resolution; r=40 preserves full ~100m native grid)
+R = 8    # Native 1:1 S2 sub-pixels per S5P cell (~600m matching raw GEE statewide export; no artificial upsampling)
 
 def s5p_grid(s5p_path):
     with rasterio.open(s5p_path) as src:

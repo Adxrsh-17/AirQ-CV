@@ -144,7 +144,7 @@ def main():
             "import os, glob\n",
             "print('=== STEP 1: RESOLVING HIGH-RES SATELLITE & WEATHER CACHE ===')\n",
             "\n",
-            "# 1. Check if high-res cache is mounted directly from Kaggle Datasets (Instant & 0 disk usage)\n",
+            "# 1. Check if cache is mounted directly from Kaggle Datasets (Instant & 0 disk usage)\n",
             "mounted_cache = None\n",
             "for root, dirs, files in os.walk('/kaggle/input'):\n",
             "    if 's2_month.npy' in files and 'meta.json' in files:\n",
@@ -158,9 +158,14 @@ def main():
             "    # Use ephemeral /kaggle/tmp (~60 GB available, keeping /kaggle/working 100% clean)\n",
             "    CACHE_DIR = '/kaggle/tmp/cache' if os.path.exists('/kaggle/tmp') else '/tmp/cache'\n",
             "    os.makedirs(CACHE_DIR, exist_ok=True)\n",
-            "    print(f'Building high-res aligned cache in {CACHE_DIR} (ephemeral ~60 GB storage)...')\n",
-            "    !python make_cache.py --s2_dir data2/s2_composites --s5p_dir data2/s5p_composites --out {CACHE_DIR} --s2_ratio 32 --weather weather/era5_tn_clusters.csv --start 2019-01-01 --end 2024-12-31 --zero_is_invalid 1\n",
-            "    print('Cache build completed in temporary storage!')\n"
+            "    print('Downloading verified native R=8 cache from https://www.kaggle.com/datasets/adarshpradeep17/airq-dualclock-cache (~15s)...')\n",
+            "    !kaggle datasets download -d adarshpradeep17/airq-dualclock-cache -p {CACHE_DIR} --unzip\n",
+            "    if os.path.exists(os.path.join(CACHE_DIR, 'meta.json')):\n",
+            "        print(f'SUCCESS: Cache downloaded and unzipped into {CACHE_DIR}!')\n",
+            "    else:\n",
+            "        print('Building aligned cache in temporary storage (RATIO=8, ~6-8 mins)...')\n",
+            "        !python make_cache.py --s2_dir data2/s2_composites --s5p_dir data2/s5p_composites --out {CACHE_DIR} --s2_ratio 8 --weather weather/era5_tn_clusters.csv --start 2019-01-01 --end 2024-12-31 --zero_is_invalid 1\n",
+            "    print('Cache ready for multi-GPU training!')\n"
         ]
     })
 
@@ -174,8 +179,9 @@ def main():
             "import os, json\n",
             "print('=== STEP 1B: PERSIST CACHE AS PERMANENT KAGGLE DATASET (ONCE AND FOR ALL) ===')\n",
             "\n",
-            "# Only publish if cache was freshly created in temporary storage\n",
-            "if not mounted_cache and os.path.exists(os.path.join(CACHE_DIR, 'meta.json')):\n",
+            "# Cache is already live at https://www.kaggle.com/datasets/adarshpradeep17/airq-dualclock-cache\n",
+            "PUBLISH_TO_OWN_ACCOUNT = False\n",
+            "if PUBLISH_TO_OWN_ACCOUNT and not mounted_cache and os.path.exists(os.path.join(CACHE_DIR, 'meta.json')):\n",
             "    print('Setting up Kaggle credentials for antonioroger2...')\n",
             "    kaggle_dir = os.path.expanduser('~/.kaggle')\n",
             "    os.makedirs(kaggle_dir, exist_ok=True)\n",
@@ -193,7 +199,7 @@ def main():
             "        json.dump(metadata, f, indent=2)\n",
             "\n",
             "    print('Uploading cache as permanent Kaggle Dataset (antonioroger2/airq-dualclock-highres-cache)...')\n",
-            "    !kaggle datasets create -p {CACHE_DIR} --dir-mode zip || kaggle datasets version -p {CACHE_DIR} -m 'High-res Rank 1 cache (R=32)' --dir-mode zip\n",
+            "    !kaggle datasets create -p {CACHE_DIR} --dir-mode zip || kaggle datasets version -p {CACHE_DIR} -m 'Native 1:1 high-fidelity cache (R=8, 600m)' --dir-mode zip\n",
             "    print('\\nSUCCESS: Cache published permanently! You can now attach antonioroger2/airq-dualclock-highres-cache to any notebook for instant 0-second mount.')\n",
             "else:\n",
             "    print('Cache already mounted from Kaggle Datasets or previously published. Skipping upload.')\n"
