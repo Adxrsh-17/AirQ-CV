@@ -79,13 +79,14 @@ class DCDataset(Dataset):
         if len(months) == 1:
             m = months[0]
             med = np.asarray(s.s2m[m][(slice(None),) + sl], np.float32)
-            ok = np.asarray(s.s2ok[m][sl]) > 0
-            return med, ok
+            ok = (np.asarray(s.s2ok[m][sl]) > 0) & np.isfinite(med).all(0)
+            return np.where(ok[None], med, 0.0).astype(np.float32), ok
         a = np.stack([np.asarray(s.s2m[m][(slice(None),) + sl], np.float32) for m in months])
-        ok = np.stack([np.asarray(s.s2ok[m][sl]) > 0 for m in months])
+        ok = np.stack([np.asarray(s.s2ok[m][sl]) > 0 for m in months]) & np.isfinite(a).all(1)
         cnt = ok.sum(0)
-        med = (a * ok[:, None]).sum(0) / np.maximum(cnt[None], 1.0)
-        return med, cnt > 0
+        # masked mean (NaN-safe: NaN*0 = NaN, so select with np.where instead of multiplying by the mask)
+        med = np.where(ok[:, None], a, 0.0).sum(0) / np.maximum(cnt[None], 1.0)
+        return med.astype(np.float32), cnt > 0
 
     @staticmethod
     def calc_biophysical_indices(bands):
@@ -99,12 +100,14 @@ class DCDataset(Dataset):
         bands[10]: B11 (SWIR 1)
         """
         eps = 1e-6
+        bands = np.nan_to_num(np.asarray(bands, np.float32), nan=0.0, posinf=0.0, neginf=0.0)
         b1, b2, b4, b5, b8, b11 = bands[0], bands[1], bands[3], bands[4], bands[7], bands[10]
-        ndbi = np.clip((b11 - b8) / (b11 + b8 + eps), -1.0, 1.0)         # Built-up / Impervious Industrial
-        ndvi = np.clip((b8 - b4) / (b8 + b4 + eps), -1.0, 1.0)           # Vegetation Canopy Sink
-        ndre = np.clip((b8 - b5) / (b8 + b5 + eps), -1.0, 1.0)           # Red Edge Chlorophyll Sensitivity
-        aer = np.clip(b1 / (b2 + eps), 0.0, 5.0) / 5.0                   # Aerosol Optical Ratio in [0, 1]
-        return np.stack([ndbi, ndvi, ndre, aer], axis=0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ndbi = np.clip((b11 - b8) / (b11 + b8 + eps), -1.0, 1.0)         # Built-up / Impervious Industrial
+            ndvi = np.clip((b8 - b4) / (b8 + b4 + eps), -1.0, 1.0)           # Vegetation Canopy Sink
+            ndre = np.clip((b8 - b5) / (b8 + b5 + eps), -1.0, 1.0)           # Red Edge Chlorophyll Sensitivity
+            aer = np.clip(b1 / (b2 + eps), 0.0, 5.0) / 5.0                   # Aerosol Optical Ratio in [0, 1]
+        return np.nan_to_num(np.stack([ndbi, ndvi, ndre, aer], axis=0), nan=0.0)
 
     def slow(s, t_end, sl, hw_res):
         lag = pd.Timedelta(days=s.cfg["s2_lag_days"])
@@ -183,6 +186,9 @@ class DCDataset(Dataset):
                  crop=np.array([i0, j0, h, w], dtype=np.int64))
         if s.has_weather and s.wx_feat is not None:
             b["weather"] = s.wx_feat[o].astype(np.float32)
+        for k in ("fast_v", "fast_m", "s2_slow", "long_mem", "y", "ym"):
+            if not np.isfinite(b[k]).all():
+                raise ValueError(f"non-finite values in '{k}' (origin={o}, crop={i0},{j0}) - check the cache")
         return {k: torch.from_numpy(np.asarray(v)) for k, v in b.items()}
 
 def collate(b):

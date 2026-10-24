@@ -132,7 +132,12 @@ def main():
             ym = crop(b["ym"]).numpy()[0]
             
             # Origin frame for persistence
-            last_valid_fast = crop(b["fast_v"][:, -1]).numpy()[0]
+            # Last *valid* observation per pixel (not just the last window, which is 0/climatology where cloudy)
+            fv_all, fm_all = b["fast_v"][0].numpy(), b["fast_m"][0].numpy()          # (L, P, H, W)
+            t_idx = np.arange(fv_all.shape[0])[:, None, None, None]
+            last_i = np.where(fm_all > 0, t_idx, -1).max(0)                           # (P, H, W)
+            last_valid_fast = np.take_along_axis(fv_all, np.maximum(last_i, 0)[None], 0)[0][..., :H, :W]
+            has_hist = (last_i >= 0)[..., :H, :W]
             
             occ = crop(o["occ_logit"]).cpu().numpy()[0]
             ev = crop(b["ev"]).numpy()[0]
@@ -160,8 +165,8 @@ def main():
                     l_p = s5_norm.inv(q10[q, p_i], c)
                     u_p = s5_norm.inv(q90[q, p_i], c)
                     pr_p = s5_norm.inv(prior[q, p_i], c)
-                    pers_p = s5_norm.inv(last_valid_fast[p_i], c)
                     cl_p = clim_sub[p_i]
+                    pers_p = np.where(has_hist[p_i], s5_norm.inv(last_valid_fast[p_i], c), cl_p)
                     
                     preds_phys[p_i][q].append(p_p.flatten())
                     targets_phys[p_i][q].append(t_p.flatten())

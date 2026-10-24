@@ -152,6 +152,14 @@ def main():
             "        break\n",
             "\n",
             "if mounted_cache:\n",
+            "    import numpy as _np\n",
+            "    _s2 = _np.load(os.path.join(mounted_cache, 's2_month.npy'), mmap_mode='r')\n",
+            "    _bad = sum(int((~_np.isfinite(_s2[m])).sum()) for m in range(_s2.shape[0]))\n",
+            "    print(f'Mounted cache {mounted_cache}: s2_month {_s2.shape} non-finite values = {_bad:,}')\n",
+            "    if _bad > 0:\n",
+            "        print('STALE CACHE (contains NaN/inf) -> rebuilding with current make_cache.py')\n",
+            "        mounted_cache = None\n",
+            "if mounted_cache:\n",
             "    print(f'Mounted Kaggle Dataset cache detected at: {mounted_cache}! (Zero disk usage)')\n",
             "    CACHE_DIR = mounted_cache\n",
             "else:\n",
@@ -159,7 +167,7 @@ def main():
             "    CACHE_DIR = '/kaggle/tmp/cache' if os.path.exists('/kaggle/tmp') else '/tmp/cache'\n",
             "    os.makedirs(CACHE_DIR, exist_ok=True)\n",
             "    print('Downloading verified native R=8 cache from https://www.kaggle.com/datasets/adarshpradeep17/airq-dualclock-cache (~15s)...')\n",
-            "    !kaggle datasets download -d adarshpradeep17/airq-dualclock-cache -p {CACHE_DIR} --unzip\n",
+            "    pass  # skip re-downloading the published cache (it is the stale one)\n",
             "    if os.path.exists(os.path.join(CACHE_DIR, 'meta.json')):\n",
             "        print(f'SUCCESS: Cache downloaded and unzipped into {CACHE_DIR}!')\n",
             "    else:\n",
@@ -185,10 +193,9 @@ def main():
             "    print('Setting up Kaggle credentials for antonioroger2...')\n",
             "    kaggle_dir = os.path.expanduser('~/.kaggle')\n",
             "    os.makedirs(kaggle_dir, exist_ok=True)\n",
-            "    kaggle_creds = {'username': 'antonioroger2', 'key': '375c60033dbfbfe213d2b3645e05814c'}\n",
-            "    with open(os.path.join(kaggle_dir, 'kaggle.json'), 'w') as f:\n",
-            "        json.dump(kaggle_creds, f)\n",
-            "    os.chmod(os.path.join(kaggle_dir, 'kaggle.json'), 0o600)\n",
+            "    # Credentials: add KAGGLE_USERNAME / KAGGLE_KEY as Kaggle Secrets; never hardcode them.\n",
+            "    from kaggle_secrets import UserSecretsClient\n",
+            "    _sec = UserSecretsClient(); os.environ['KAGGLE_USERNAME'] = _sec.get_secret('KAGGLE_USERNAME'); os.environ['KAGGLE_KEY'] = _sec.get_secret('KAGGLE_KEY')\n",
             "\n",
             "    metadata = {\n",
             "        'title': 'AirQ Dual-Clock High-Res Cache',\n",
@@ -213,8 +220,9 @@ def main():
         "metadata": {},
         "outputs": [],
         "source": [
-            "print('=== STEP 2: TRAINING DC-NET ON 2x T4 GPUs (STAGE 1, NO2 FOCUS) ===')\n",
-            "!python -u train.py --cache {CACHE_DIR} --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs 120 --workers 2 --vram_cap 0.90\n"
+            "EPOCHS = 3  # smoke test: confirm finite train/val loss. Set to 120 for the full run.\n",
+            "print(f'=== STEP 2: TRAINING DC-NET (STAGE 1, NO2, {EPOCHS} epochs, single GPU) ===')\n",
+            "!python -u train.py --cache {CACHE_DIR} --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs {EPOCHS} --workers 2 --vram_cap 0.90 --no_dp\n"
         ]
     })
 
