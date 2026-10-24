@@ -96,8 +96,11 @@ class DCDataset(Dataset):
     def __getitem__(s, k):
         cfg = s.cfg; rng = np.random
         o = s.origins[rng.randint(len(s.origins))] if s.split == "train" else s.origins[k]
-        P = cfg["patch"]
-        if s.split == "train": i0, j0 = rng.randint(0, s.H5 - P + 1), rng.randint(0, s.W5 - P + 1); h = w = P
+        P = min(cfg["patch"], s.H5, s.W5)
+        if s.split == "train":
+            i0 = rng.randint(0, max(1, s.H5 - P + 1)) if s.H5 > P else 0
+            j0 = rng.randint(0, max(1, s.W5 - P + 1)) if s.W5 > P else 0
+            h = w = P
         else: i0 = j0 = 0; h, w = s.H5, s.W5
         Hp, Wp = (-(-h // 8)) * 8, (-(-w // 8)) * 8
         pad = lambda a, k=1: np.pad(a, [(0, 0)] * (a.ndim - 2) + [(0, Hp * k - a.shape[-2]), (0, Wp * k - a.shape[-1])])
