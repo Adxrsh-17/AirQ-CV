@@ -87,8 +87,10 @@ def main(a):
         p = os.path.join(a.s2_dir, f"s2_{w_date:%Y%m%d}.tif")
         if not os.path.exists(p): return None
         x, v = align_s2_to_s5p(p, tf, H5, W5, crs, r=R_use); ok = v[0] > 0.5
+        x = np.clip(x, -100.0, 10000.0)
         x[:, ~ok] = np.nan
-        return x.astype(np.float16), ok
+        with np.errstate(all="ignore"):
+            return x.astype(np.float16), ok
 
     workers = getattr(a, "workers", 4) or 4
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -97,8 +99,11 @@ def main(a):
             results = list(executor.map(align_worker, items))
             stack = [r[0] for r in results if r is not None]
             if stack:
-                med = np.nanmedian(np.stack(stack).astype(np.float32), axis=0); ok = np.isfinite(med[0])
-                s2m[m] = np.nan_to_num(med, nan=0.0).astype(np.float16); s2ok[m] = ok
+                with np.errstate(all="ignore"):
+                    med = np.nanmedian(np.stack(stack).astype(np.float32), axis=0)
+                    ok = np.isfinite(med[0])
+                    s2m[m] = np.nan_to_num(med, nan=0.0).astype(np.float16)
+                    s2ok[m] = ok
 
     for k, v in dict(s5p_val=val, s5p_mask=msk, s5p_month=s5m, s5p_month_ok=s5ok).items(): np.save(os.path.join(a.out, k + ".npy"), v)
     s2m.flush(); s2ok.flush()
