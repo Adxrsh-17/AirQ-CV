@@ -76,11 +76,16 @@ class DCDataset(Dataset):
         return (x - np.array(s.s2_stats["mu"], np.float32)[:, None, None]) / np.array(s.s2_stats["sd"], np.float32)[:, None, None]
 
     def _nanmed(s, months, sl):
+        if len(months) == 1:
+            m = months[0]
+            med = np.asarray(s.s2m[m][(slice(None),) + sl], np.float32)
+            ok = np.asarray(s.s2ok[m][sl]) > 0
+            return med, ok
         a = np.stack([np.asarray(s.s2m[m][(slice(None),) + sl], np.float32) for m in months])
         ok = np.stack([np.asarray(s.s2ok[m][sl]) > 0 for m in months])
-        a[~np.broadcast_to(ok[:, None], a.shape)] = np.nan
-        with np.errstate(all="ignore"): med = np.nanmedian(a, 0)
-        return med, np.isfinite(med[0])
+        cnt = ok.sum(0)
+        med = (a * ok[:, None]).sum(0) / np.maximum(cnt[None], 1.0)
+        return med, cnt > 0
 
     @staticmethod
     def calc_biophysical_indices(bands):

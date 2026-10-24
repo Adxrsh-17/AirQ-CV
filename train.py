@@ -8,7 +8,7 @@ SPLITS_STAGE2 = dict(train=["2019-01-01", "2024-12-31"], val=["2025-01-01", "202
 SPLITS_LEGACY = dict(train=["2019-01-01", "2022-12-31"], val=["2023-01-01", "2023-12-31"], test=["2024-01-01", "2024-12-31"])
 
 CFG = dict(L=12, steps=list(HORIZON_STEPS), patch=64, s2_lag_days=20, so2_event_q=0.85, mask_aug=0.1, min_origin_idx=12,
-           samples_per_epoch=1000, batch=8, epochs=120, lr=3e-4, wd=0.05, warmup=3, ema=0.999, clip=1.0, patience=15,
+           samples_per_epoch=400, batch=8, epochs=120, lr=3e-4, wd=0.05, warmup=3, ema=0.999, clip=1.0, patience=15,
            n_poll=1, poll_idx=[0], long_mem_dropout=0.5,
            splits=SPLITS_STAGE1)
 
@@ -128,7 +128,7 @@ def main(a):
 
     for ep in range(cfg["epochs"]):
         model.train(); raw_model.train(); run = 0.0
-        for b in tl:
+        for b_idx, b in enumerate(tl):
             for g in opt.param_groups: g["lr"] = cfg["lr"] * sched(step)
             b = to_dev(b, dev)
             with torch.cuda.amp.autocast(enabled=amp):
@@ -140,6 +140,8 @@ def main(a):
             with torch.no_grad():
                 d = min(cfg["ema"], (1 + step) / (10 + step))
                 for pe, pm in zip(ema.parameters(), raw_model.parameters()): pe.mul_(d).add_(pm.detach(), alpha=1 - d)
+            if (b_idx + 1) % 25 == 0 or (b_idx + 1) == iters:
+                print(f"  ep {ep:02d} [{b_idx+1:3d}/{iters}] batch loss: {loss.item():.4f} | lr: {opt.param_groups[0]['lr']:.2e}", flush=True)
 
         vloss, r2, cov = evaluate(ema, vl, dev, peak, n_poll=tr.n_poll)
         if tr.n_poll == 1:
@@ -172,7 +174,7 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="runs/dcnet")
     ap.add_argument("--cfg", default=None)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--workers", type=int, default=0)
+    ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--vram_cap", type=float, default=0.60)
     ap.add_argument("--use_weather", type=int, default=1)

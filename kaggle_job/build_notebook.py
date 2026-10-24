@@ -214,7 +214,7 @@ def main():
         "outputs": [],
         "source": [
             "print('=== STEP 2: TRAINING DC-NET ON 2x T4 GPUs (STAGE 1, NO2 FOCUS) ===')\n",
-            "!python train.py --cache {CACHE_DIR} --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs 120 --vram_cap 0.90\n"
+            "!python -u train.py --cache {CACHE_DIR} --out /kaggle/working/runs/dcnet_main --stage 1 --poll NO2 --long_mem_dropout 0.50 --batch 8 --epochs 120 --workers 2 --vram_cap 0.90\n"
         ]
     })
 
