@@ -219,7 +219,7 @@ def main():
         "outputs": [],
         "source": [
             "# MODE: 'landuse' = Rule.md Stage A (spatial land-use baseline); 'dcnet' = Stage B forecaster (Rule.md section 7)\n",
-            "MODE = 'dcnet'\n",
+            "MODE = 'dcnet'     # 'dcnet' = prior + train + evaluate; 'eval' = NO training: load an existing best.pt (add it as a Kaggle dataset input) and only evaluate\n",
             "EPOCHS = 40          # early stopping (patience 10) on mean validation skill vs climatology\n",
             "POLL = 'all'         # 'all' = NO2+CO+SO2 joint model, or 'NO2' / 'CO' / 'SO2'\n",
             "ABLATE_B = False     # True: also train Config B (no S2, no prior) to measure what land use adds (doubles run time)\n",
@@ -227,7 +227,7 @@ def main():
             "RUN = '/kaggle/working/runs'\n",
             "PRIOR_DIR = '/kaggle/working/priors'\n",
             "AUX_DIR = CACHE_DIR if os.access(CACHE_DIR, os.W_OK) else '/kaggle/tmp/aux'\n",
-            "CONFIGS = ['C'] + (['B'] if ABLATE_B else [])\n",
+            "CONFIGS = ['C'] + (['B'] if (ABLATE_B and MODE == 'dcnet') else [])\n",
             "OUT = f'{RUN}/dcnet_{POLL}_C_s{SEEDS[0]}'\n",
             "print('=== CACHE AUDIT (valid-pixel coverage, finiteness) ===')\n",
             "!python check_cache.py --cache {CACHE_DIR} --csv /kaggle/working/cache_audit.csv\n",
@@ -254,9 +254,14 @@ def main():
         "metadata": {},
         "outputs": [],
         "source": [
-            "if MODE == 'dcnet':\n",
+            "if MODE in ('dcnet', 'eval'):\n",
             "    for _cfg in CONFIGS:\n",
-            "        _ck = ','.join(f'{RUN}/dcnet_{POLL}_{_cfg}_s{_sd}/best.pt' for _sd in SEEDS)\n",
+            "        if MODE == 'eval':\n",
+            "            _found = sorted(glob.glob('/kaggle/input/**/best.pt', recursive=True))\n",
+            "            assert _found, 'MODE=eval needs a checkpoint: add best.pt as a Kaggle dataset input'\n",
+            "            _ck = _found[0]; print('using checkpoint', _ck)\n",
+            "        else:\n",
+            "            _ck = ','.join(f'{RUN}/dcnet_{POLL}_{_cfg}_s{_sd}/best.pt' for _sd in SEEDS)\n",
             "        print(f'=== STAGE B-3: EVALUATE config {_cfg} on the 2024 validation year ===')\n",
             "        !python -u evaluate.py --ckpt {_ck} --cache {CACHE_DIR} --split val --out {RUN}/eval_{POLL} --tag {_cfg}\n"
         ]
@@ -273,7 +278,7 @@ def main():
             "if MODE == 'landuse':\n",
             "    for f_ in sorted(glob.glob('/kaggle/working/runs/landuse/*.csv')):\n",
             "        print('\\n' + '='*80 + '\\n' + f_ + '\\n' + '='*80); print(pd.read_csv(f_).to_string(index=False))\n",
-            "if MODE == 'dcnet':\n",
+            "if MODE in ('dcnet', 'eval'):\n",
             "    from IPython.display import Image, display\n",
             "    _ev = f'{RUN}/eval_{POLL}'\n",
             "    _m = {c: pd.read_csv(f'{_ev}/dcnet_val_metrics_{c}.csv') for c in CONFIGS if os.path.exists(f'{_ev}/dcnet_val_metrics_{c}.csv')}\n",
