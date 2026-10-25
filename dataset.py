@@ -15,7 +15,7 @@ Targets are used only if the target window lies in the same split (rule B1).
 import json, os, numpy as np, pandas as pd, torch
 from torch.utils.data import Dataset
 
-BANDS = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B9", "B11", "B12"]
+BANDS = ["B2", "B3", "B4", "B5", "B6", "B7", "B8", "B11", "B12", "NDVI", "NDBI", "NDMI"]   # export channel order (GEE: 9 reflectances /1e4 + NDVI, NDBI, NDMI)
 POLL_NAMES = ["NO2", "CO", "SO2"]
 IDX_NAMES = ["NDBI", "NDVI", "MNDWI", "NDRE", "BSI"]
 N_IDX = len(IDX_NAMES)
@@ -60,7 +60,7 @@ class WeatherNorm:
 def s2_indices(b):
     """b: (12, H, W) reflectance (any scale). Returns (5, H, W): NDBI, NDVI, MNDWI, NDRE, BSI."""
     b = np.nan_to_num(np.asarray(b, np.float32), nan=0.0, posinf=0.0, neginf=0.0)
-    B2, B3, B4, B5, B8, B11 = b[1], b[2], b[3], b[4], b[7], b[10]
+    B2, B3, B4, B5, B8, B11 = (b[BANDS.index(k)] for k in ("B2", "B3", "B4", "B5", "B8", "B11"))
     nd = lambda x, y: np.clip((x - y) / (x + y + 1e-6), -1.0, 1.0)
     with np.errstate(all="ignore"):
         out = np.stack([nd(B11, B8),               # NDBI  built-up / impervious
