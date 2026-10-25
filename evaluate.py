@@ -89,6 +89,37 @@ def block_bootstrap(num, den, block=6, n=1000, seed=0):
     return float(np.percentile(out, 2.5)), float(np.percentile(out, 97.5))
 
 
+# ----------------------------------------------------------------------------- region box
+KONGU = (76.3, 10.5, 78.5, 12.0)     # Palakkad 76.65E 10.78N ... Salem/Namakkal 78.2E 11.7N
+
+
+def region_slices(a, H5, W5):
+    """(row_slice, col_slice) of the evaluation box on the S5P grid, or None."""
+    if a.bbox_rc:
+        r0, r1, c0, c1 = [int(v) for v in a.bbox_rc.split(",")]
+    elif a.bbox and a.bbox.lower() != "none":
+        import glob, rasterio
+        from rasterio.windows import from_bounds
+        box = KONGU if a.bbox.lower() == "kongu" else tuple(float(v) for v in a.bbox.split(","))
+        ref = a.ref_tif
+        if not ref:
+            for pat in ("data2/s5p_composites/s5p_*.tif", "/kaggle/input/**/s5p_*.tif", "**/s5p_*.tif"):
+                hit = sorted(glob.glob(pat, recursive=True))
+                if hit: ref = hit[0]; break
+        if not ref: print("[bbox] no S5P GeoTIFF found; pass --ref_tif or --bbox_rc. Skipping bbox region."); return None
+        with rasterio.open(ref) as src:
+            if (src.height, src.width) != (H5, W5):
+                print(f"[bbox] reference grid {(src.height, src.width)} != cache grid {(H5, W5)}; skipping bbox region."); return None
+            w = from_bounds(*box, transform=src.transform)
+            r0, r1 = int(np.floor(w.row_off)), int(np.ceil(w.row_off + w.height)); c0, c1 = int(np.floor(w.col_off)), int(np.ceil(w.col_off + w.width))
+    else:
+        return None
+    r0, r1, c0, c1 = max(r0, 0), min(r1, H5), max(c0, 0), min(c1, W5)
+    if r1 - r0 < 4 or c1 - c0 < 4: print(f"[bbox] box rows {r0}:{r1} cols {c0}:{c1} too small / outside grid; skipping."); return None
+    print(f"[bbox] evaluation box rows {r0}:{r1} x cols {c0}:{c1} = {r1 - r0}x{c1 - c0} cells (~{(r1 - r0) * 5.5:.0f} x {(c1 - c0) * 5.5:.0f} km)")
+    return slice(r0, r1), slice(c0, c1)
+
+
 # ----------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
@@ -99,6 +130,9 @@ def main():
     ap.add_argument("--px_km", type=float, default=5.5, help="S5P grid spacing in km (centroid error)")
     ap.add_argument("--n_boot", type=int, default=1000)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--bbox", default="kongu", help="'kongu' (Coimbatore+Palakkad+Tiruppur+Erode+Salem+Namakkal), 'none', or lon0,lat0,lon1,lat1")
+    ap.add_argument("--bbox_rc", default=None, help="alternative to --bbox: r0,r1,c0,c1 grid rows/cols (half-open)")
+    ap.add_argument("--ref_tif", default=None, help="any S5P GeoTIFF of the grid (to map lon/lat -> rows/cols)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -130,13 +164,16 @@ def main():
     thr_phys = np.stack([[ds.norm.inv(ds.thr[m, c], c) for c in ds.poll_idx] for m in range(12)])   # (12, P)
     hold = ds.hold > 0
     rng_obs = {}
+    RS = region_slices(a, H5, W5)
+    box = np.zeros((H5, W5), bool)
+    if RS is not None: box[RS] = True
 
     keys = [(q, p) for q in range(Q) for p in range(P)]
-    pooled = {k: dict(y=[], f=[], c=[], s=[], lo=[], hi=[], th=[], h=[]) for k in keys}
-    per_origin = {k: dict(m=[], c=[], s=[], am=[]) for k in keys}
-    ssim = {k: dict(m=[], c=[], s=[]) for k in keys}
-    blobs = {(q, p, src): dict(n_obs=0, n_pred=0, tp=0, iou=0.0, cdist=0.0, larea=0.0, pbias=0.0)
-             for q in range(Q) for p in range(P) for src in ("model", "climatology", "persistence")}
+    pooled = {k: dict(y=[], f=[], c=[], s=[], lo=[], hi=[], th=[], h=[], b=[]) for k in keys}
+    per_origin = {k: dict(m=[], c=[], s=[], mb=[], cb=[], sb=[]) for k in keys}
+    ssim = {k: dict(m=[], c=[], s=[], mb=[], cb=[], sb=[]) for k in keys}
+    blobs = {(q, p, src, reg): dict(n_obs=0, n_pred=0, tp=0, iou=0.0, cdist=0.0, larea=0.0, pbias=0.0)
+             for q in range(Q) for p in range(P) for src in ("model", "climatology", "persistence") for reg in ("all", "bbox")}
     occ_all = {q: ([], []) for q in range(Q)}
     sel_o = set(ds.origins[i] for i in np.linspace(0, len(ds.origins) - 1, min(3, len(ds.origins))).astype(int))
     panels = []
@@ -170,16 +207,22 @@ def main():
                     th = thr_phys[tmon - 1, p_i]
                     k = (q, p_i); d = pooled[k]
                     for nm, arr in (("y", yt), ("f", f), ("c", cl), ("s", pers), ("lo", lo), ("hi", hi)): d[nm].append(arr[mk])
-                    d["th"].append(np.full(mk.sum(), th, np.float32)); d["h"].append(hold[mk])
+                    d["th"].append(np.full(mk.sum(), th, np.float32)); d["h"].append(hold[mk]); d["b"].append(box[mk])
                     po = per_origin[k]
                     po["m"].append(((yt - f)[mk] ** 2).sum()); po["c"].append(((yt - cl)[mk] ** 2).sum())
                     po["s"].append(((yt - pers)[mk] ** 2).sum())
+                    mb = mk & box
+                    po["mb"].append(((yt - f)[mb] ** 2).sum()); po["cb"].append(((yt - cl)[mb] ** 2).sum()); po["sb"].append(((yt - pers)[mb] ** 2).sum())
                     if p_i not in rng_obs: rng_obs[p_i] = float(np.percentile(yt[mk], 99) - np.percentile(yt[mk], 1))
                     for nm, mp in (("m", f), ("c", cl), ("s", pers)):
                         ssim[k][nm].append(masked_ssim(yt, mp, mk, rng_obs[p_i]))
+                        if RS is not None: ssim[k][nm + "b"].append(masked_ssim(yt[RS], mp[RS], mk[RS], rng_obs[p_i]))
                     for src, mp in (("model", f), ("climatology", cl), ("persistence", pers)):
                         r = blob_stats(yt, mp, mk, th, a.px_km)
-                        for kk, vv_ in r.items(): blobs[(q, p_i, src)][kk] += vv_
+                        for kk, vv_ in r.items(): blobs[(q, p_i, src, "all")][kk] += vv_
+                        if RS is not None:
+                            r = blob_stats(yt[RS], mp[RS], mk[RS], th, a.px_km)
+                            for kk, vv_ in r.items(): blobs[(q, p_i, src, "bbox")][kk] += vv_
                     if o_idx in sel_o and horizons[q] in (5, 30, 120):
                         panels.append(dict(o=o_idx, q=q, p=p_i, y=np.where(mk, yt, np.nan), f=f, w=hi - lo, th=th,
                                            date=f"{ds.ws[o_idx] + pd.Timedelta(days=5 * st):%Y-%m-%d}"))
@@ -189,7 +232,9 @@ def main():
         if not d["y"]: continue
         cat = {k: np.concatenate(v) for k, v in d.items()}
         po = {k: np.array(v) for k, v in per_origin[(q, p_i)].items()}
-        for region, sel in (("all", np.ones_like(cat["h"], bool)), ("heldout_blocks", cat["h"])):
+        regions = [("all", np.ones_like(cat["h"], bool)), ("heldout_blocks", cat["h"])]
+        if RS is not None: regions.append(("bbox", cat["b"]))
+        for region, sel in regions:
             if sel.sum() < 50: continue
             y, f, c_, s_ = cat["y"][sel], cat["f"][sel], cat["c"][sel], cat["s"][sel]
             sse = ((y - f) ** 2).sum()
@@ -204,11 +249,13 @@ def main():
                        interval_width=float(np.mean(cat["hi"][sel] - cat["lo"][sel])))
             th = cat["th"][sel]; hit = ((f > th) & (y > th)).sum(); fa = ((f > th) & (y <= th)).sum(); mi = ((f <= th) & (y > th)).sum()
             row["CSI_p90"] = hit / max(hit + fa + mi, 1)
-            if region == "all":
-                row["SS_clim_lo"], row["SS_clim_hi"] = block_bootstrap(po["m"], po["c"], n=a.n_boot)
-                row["SS_pers_lo"], row["SS_pers_hi"] = block_bootstrap(po["m"], po["s"], n=a.n_boot)
+            if region in ("all", "bbox"):
+                sx = "" if region == "all" else "b"
+                row["SS_clim_lo"], row["SS_clim_hi"] = block_bootstrap(po["m" + sx], po["c" + sx], n=a.n_boot)
+                row["SS_pers_lo"], row["SS_pers_hi"] = block_bootstrap(po["m" + sx], po["s" + sx], n=a.n_boot)
                 for nm, lab in (("m", "SSIM"), ("c", "SSIM_climatology"), ("s", "SSIM_persistence")):
-                    row[lab] = float(np.nanmean(ssim[(q, p_i)][nm])) if ssim[(q, p_i)][nm] else np.nan
+                    row[lab] = float(np.nanmean(ssim[(q, p_i)][nm + sx])) if ssim[(q, p_i)][nm + sx] else np.nan
+            if region == "all":
                 if pn[p_i] == "SO2" and occ_all[q][0]:
                     try:
                         from sklearn.metrics import roc_auc_score, average_precision_score
@@ -217,8 +264,9 @@ def main():
                     except Exception as e:
                         print("AUC skipped:", e)
             rows.append(row)
-        for src in ("model", "climatology", "persistence"):
-            brows.append(dict(pollutant=pn[p_i], horizon_days=horizons[q], source=src, **summarise_blobs(blobs[(q, p_i, src)])))
+        for reg in ("all", "bbox") if RS is not None else ("all",):
+            for src in ("model", "climatology", "persistence"):
+                brows.append(dict(pollutant=pn[p_i], horizon_days=horizons[q], region=reg, source=src, **summarise_blobs(blobs[(q, p_i, src, reg)])))
 
     df, bf = pd.DataFrame(rows), pd.DataFrame(brows)
     f1, f2 = os.path.join(a.out, f"dcnet_{a.split}_metrics{tag}.csv"), os.path.join(a.out, f"dcnet_{a.split}_blobs{tag}.csv")
@@ -232,8 +280,15 @@ def main():
         print("\n=== spatial hold-out blocks (never in the training loss) ===")
         print(df[df.region == "heldout_blocks"][["pollutant", "horizon_days", "SS_clim", "SS_pers", "anomaly_r", "R2"]]
               .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
-    print("\n=== hotspot blobs ===")
-    print(bf.pivot_table(index=["pollutant", "horizon_days"], columns="source", values="blob_F1").to_string(float_format=lambda v: f"{v:.3f}"))
+    if (df.region == "bbox").any():
+        print("\n=== REGION BOX (Coimbatore, Palakkad, Tiruppur, Erode, Salem, Namakkal) - full-state inference, scored inside the box ===")
+        print(df[df.region == "bbox"][["pollutant", "horizon_days", "n", "SS_clim", "SS_clim_lo", "SS_clim_hi", "SS_pers", "anomaly_r", "R2", "R2_climatology", "SSIM", "coverage_80"]]
+              .to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    print("\n=== hotspot blobs (F1; region = all) ===")
+    print(bf[bf.region == "all"].pivot_table(index=["pollutant", "horizon_days"], columns="source", values="blob_F1").to_string(float_format=lambda v: f"{v:.3f}"))
+    if (bf.region == "bbox").any():
+        print("\n=== hotspot blobs inside the box (F1) ===")
+        print(bf[bf.region == "bbox"].pivot_table(index=["pollutant", "horizon_days"], columns="source", values="blob_F1").to_string(float_format=lambda v: f"{v:.3f}"))
     print(f"\nsaved {f1}\nsaved {f2}")
 
     # ------------------------------------------------------------------ figures
@@ -242,7 +297,7 @@ def main():
         al = df[df.region == "all"]
         fig, ax = plt.subplots(P, 4, figsize=(18, 3.6 * P), squeeze=False)
         for p_i, pname in enumerate(pn):
-            g = al[al.pollutant == pname].sort_values("horizon_days"); gb = bf[bf.pollutant == pname]
+            g = al[al.pollutant == pname].sort_values("horizon_days"); gb = bf[(bf.pollutant == pname) & (bf.region == "all")]
             if g.empty: continue
             x = g.horizon_days.values
             ax[p_i, 0].plot(x, g.SS_clim, "o-", label="model"); ax[p_i, 0].fill_between(x, g.SS_clim_lo, g.SS_clim_hi, alpha=.25)
@@ -271,6 +326,23 @@ def main():
                 im = ax[r_, 2].imshow(d["w"], cmap="viridis"); ax[r_, 2].set_title("q90 - q10"); plt.colorbar(im, ax=ax[r_, 2], fraction=.04)
                 for k_ in range(3): ax[r_, k_].axis("off")
             fig.tight_layout(); fig.savefig(os.path.join(a.out, f"panels_{pname}_{a.split}{tag}.png"), dpi=100); plt.close(fig)
+        if RS is not None:
+            for p_i, pname in enumerate(pn):
+                pp = [d for d in panels if d["p"] == p_i]
+                if not pp: continue
+                fig, ax = plt.subplots(len(pp), 3, figsize=(13, 3.2 * len(pp)), squeeze=False)
+                for r_, d in enumerate(pp):
+                    y_, f_, w_ = d["y"][RS], d["f"][RS], d["w"][RS]
+                    if not np.isfinite(y_).any(): continue
+                    vmin, vmax = np.nanpercentile(y_, 2), np.nanpercentile(y_, 98)
+                    ax[r_, 0].imshow(y_, vmin=vmin, vmax=vmax, cmap="magma"); ax[r_, 0].set_title(f"observed {d['date']} (box)")
+                    ax[r_, 1].imshow(f_, vmin=vmin, vmax=vmax, cmap="magma")
+                    ax[r_, 1].contour((np.nan_to_num(y_, nan=-np.inf) > d["th"]).astype(float), levels=[.5], colors="cyan", linewidths=.8)
+                    ax[r_, 1].contour((f_ > d["th"]).astype(float), levels=[.5], colors="lime", linewidths=.8)
+                    ax[r_, 1].set_title(f"q50 +{horizons[d['q']]} d")
+                    im = ax[r_, 2].imshow(w_, cmap="viridis"); ax[r_, 2].set_title("q90 - q10"); plt.colorbar(im, ax=ax[r_, 2], fraction=.04)
+                    for k_ in range(3): ax[r_, k_].axis("off")
+                fig.tight_layout(); fig.savefig(os.path.join(a.out, f"panels_{pname}_{a.split}{tag}_box.png"), dpi=100); plt.close(fig)
         print(f"figures saved in {a.out}")
     except Exception as e:
         print("figure step skipped:", e)
