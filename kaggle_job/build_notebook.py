@@ -4,7 +4,7 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
     # Read code files
-    code_files = ["align_tn.py", "dataset.py", "dcnet.py", "train.py", "evaluate.py", "make_cache.py", "app.py", "check_cache.py", "landuse_baseline.py"]
+    code_files = ["align_tn.py", "dataset.py", "dcnet.py", "train.py", "evaluate.py", "make_cache.py", "app.py", "check_cache.py", "landuse_baseline.py", "attribution_test.py"]
     code_contents = {}
     for cf in code_files:
         with open(os.path.join(root, cf), "r") as f:
@@ -263,7 +263,9 @@ def main():
             "        else:\n",
             "            _ck = ','.join(f'{RUN}/dcnet_{POLL}_{_cfg}_s{_sd}/best.pt' for _sd in SEEDS)\n",
             "        print(f'=== STAGE B-3: EVALUATE config {_cfg} on the 2024 validation year ===')\n",
-            "        !python -u evaluate.py --ckpt {_ck} --cache {CACHE_DIR} --split val --out {RUN}/eval_{POLL} --tag {_cfg}\n"
+            "        !python -u evaluate.py --ckpt {_ck} --cache {CACHE_DIR} --split val --out {RUN}/eval_{POLL} --tag {_cfg}\n",
+            "        print(f'=== STAGE B-4: INPUT ATTRIBUTION + S2-ONLY HOTSPOT TEST (config {_cfg}, no retraining) ===')\n",
+            "        !python -u attribution_test.py --ckpt {_ck.split(',')[0]} --cache {CACHE_DIR} --split val --out {RUN}/attribution_{POLL}_{_cfg}\n"
         ]
     })
 
@@ -291,6 +293,8 @@ def main():
             "        print('\\nhotspot blobs:'); print(_b.to_string(index=False, float_format=lambda v: f'{v:.3f}'))\n",
             "        for _f in [f'{_ev}/summary_val_{c}.png'] + sorted(glob.glob(f'{_ev}/panels_*_val_{c}*.png')):\n",
             "            if os.path.exists(_f): display(Image(_f))\n",
+            "    for _c in CONFIGS:\n",
+            "        for _f in sorted(glob.glob(f'{RUN}/attribution_{POLL}_{_c}/*.png')): display(Image(_f))\n",
             "    if 'C' in _m and 'B' in _m:\n",
             "        _j = _m['C'].merge(_m['B'], on=['pollutant', 'horizon_days', 'region'], suffixes=('_C', '_B'))\n",
             "        _j['land_use_gain'] = _j['SS_clim_C'] - _j['SS_clim_B']\n",
