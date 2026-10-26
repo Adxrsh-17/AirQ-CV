@@ -220,15 +220,13 @@ class DualClockInferenceEngine:
 
         if self.is_live and split_key in self.datasets:
             ds = self.datasets[split_key]
-            n_samples = len(ds.origins)
             cache_end_date = f"{ds.ws[-1]:%Y-%m-%d}"
             n_ws = len(ds.ws)
+            # Strictly restrict to valid observed frames (prevent out-of-bounds!)
             obs_indices = [i for i, org in enumerate(ds.origins) if org + step < n_ws]
             last_obs_idx = obs_indices[-1] if obs_indices else 0
             n_observed = len(obs_indices)
         else:
-            counts = {"train": 354, "val": 73, "test": 130}
-            n_samples = counts.get(split_key, 73)
             cache_end_date = "2026-10-11"
             if split_key == "test":
                 test_origins = list(range(439, 569))
@@ -236,19 +234,50 @@ class DualClockInferenceEngine:
                 last_obs_idx = obs_indices[-1] if obs_indices else 0
                 n_observed = len(obs_indices)
             else:
+                counts = {"train": 354, "val": 73, "test": 130}
+                n_samples = counts.get(split_key, 73)
                 last_obs_idx = n_samples - 1
                 n_observed = n_samples
 
-        max_idx = max(0, n_samples - 1)
+        # Strictly clamp maximum to length - 1 of valid observed frames (e.g. 105 for +120d)
+        max_idx = max(0, last_obs_idx)
         return {
-            "n_samples": n_samples,
+            "n_samples": n_observed,
             "max_idx": max_idx,
-            "last_obs_idx": last_obs_idx,
+            "last_obs_idx": max_idx,
             "n_observed": n_observed,
             "cache_end_date": cache_end_date,
             "lead_days": h_days,
             "lead_steps": step
         }
+
+    def get_origin_date(self, split_key, sample_idx):
+        if self.is_live and split_key in self.datasets:
+            ds = self.datasets[split_key]
+            sample_idx = max(0, min(int(sample_idx), len(ds.origins) - 1))
+            return f"{ds.ws[ds.origins[sample_idx]]:%Y-%m-%d}"
+        else:
+            base_years = {"train": 2019, "val": 2024, "test": 2025}
+            y = base_years.get(split_key, 2024)
+            dt = pd.Timestamp(f"{y}-01-01") + pd.Timedelta(days=5 * int(sample_idx))
+            return f"{dt:%Y-%m-%d}"
+
+    def get_target_date(self, split_key, sample_idx, horizon_idx=0):
+        step = HORIZON_STEPS[horizon_idx] if horizon_idx < len(HORIZON_STEPS) else 1
+        h_days = HORIZONS_DAYS[horizon_idx] if horizon_idx < len(HORIZONS_DAYS) else 5
+        if self.is_live and split_key in self.datasets:
+            ds = self.datasets[split_key]
+            sample_idx = max(0, min(int(sample_idx), len(ds.origins) - 1))
+            tgt_idx = ds.origins[sample_idx] + step
+            if tgt_idx < len(ds.ws):
+                return f"{ds.ws[tgt_idx]:%Y-%m-%d}"
+            else:
+                return f"{ds.ws[ds.origins[sample_idx]] + pd.Timedelta(days=h_days):%Y-%m-%d}"
+        else:
+            base_years = {"train": 2019, "val": 2024, "test": 2025}
+            y = base_years.get(split_key, 2024)
+            dt = pd.Timestamp(f"{y}-01-01") + pd.Timedelta(days=5 * int(sample_idx) + h_days)
+            return f"{dt:%Y-%m-%d}"
 
     @torch.no_grad()
     def predict(self, split_key, sample_idx, horizon_step_idx, poll_name="NO2", region_key=None):
@@ -264,7 +293,11 @@ class DualClockInferenceEngine:
                 active_split = split_key
 
             ds = self.datasets[active_split]
-            sample_idx = max(0, min(sample_idx, len(ds.origins) - 1))
+            # Disallow invalid frames: clamp sample_idx strictly to valid observation boundary
+            step = HORIZON_STEPS[horizon_step_idx] if horizon_step_idx < len(HORIZON_STEPS) else 1
+            valid_origins = [i for i, org in enumerate(ds.origins) if org + step < len(ds.ws)]
+            max_valid = valid_origins[-1] if valid_origins else len(ds.origins) - 1
+            sample_idx = max(0, min(int(sample_idx), max_valid))
             b_raw = ds[sample_idx]
             b = collate([b_raw])
             b = {k: (v.to(self.dev) if torch.is_tensor(v) else v) for k, v in b.items()}
@@ -725,25 +758,26 @@ def build_app(ckpt_path=None, cache_dir=None):
                 )
 
                 init_bounds = engine.get_split_slider_bounds("val", 0)
-                n_init = init_bounds["n_samples"]
+                init_step = min(41, init_bounds["max_idx"])
+                init_orig_d = engine.get_origin_date("val", init_step)
+                init_tgt_d = engine.get_target_date("val", init_step, 0)
 
                 step_slider = gr.Slider(
                     minimum=0,
                     maximum=init_bounds["max_idx"],
-                    value=min(42, init_bounds["max_idx"]),
+                    value=init_step,
                     step=1,
-                    label=f"Smart Observation Slider (Validation: {n_init} Windows)",
-                    info=f"All {n_init} windows ground-truth verified across 2024 (100% Cache Coverage)"
+                    label=f"📅 Observation Date: {init_orig_d} (Window #{init_step} of {init_bounds['max_idx']}) · Target: {init_tgt_d} (+{init_bounds['lead_days']}d)",
+                    info=f"Valid Horizon Range: 0 to {init_bounds['max_idx']} ({init_bounds['n_samples']} Windows) | 100% Cache Verified"
                 )
 
                 date_badge = gr.Markdown("**Observation Window:** Initializing...")
 
                 with gr.Row():
-                    first_btn = gr.Button("⏮ First (#0)", size="sm")
+                    first_btn = gr.Button("⏮ Start (#0)", size="sm")
                     prev_btn = gr.Button("◀ Prev", size="sm")
                     next_btn = gr.Button("Next ▶", size="sm")
-                    jump_obs_btn = gr.Button("⭐ Latest Observed", size="sm")
-                    latest_btn = gr.Button("⏭ Latest Forecast", size="sm")
+                    latest_btn = gr.Button("⏭ Latest Verified", size="sm")
 
                 palette_dropdown = gr.Dropdown(
                     choices=["viridis", "turbo", "plasma", "inferno", "coolwarm"],
@@ -763,47 +797,46 @@ def build_app(ckpt_path=None, cache_dir=None):
                 plot_output = gr.Image(label="2D Spatial Pollution Contour Comparison", type="pil")
                 metrics_output = gr.Markdown()
 
+        # Helper to generate Dynamic Date in Slider Title & Strict Bounds Clamping
+        def get_slider_labels(split_label, horizon_label, step_val):
+            s_key = SPLITS.get(split_label, "val")
+            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
+            bounds = engine.get_split_slider_bounds(s_key, h_idx)
+            max_idx = bounds["max_idx"]
+            valid_val = min(max(0, int(step_val)), max_idx)
+            orig_d = engine.get_origin_date(s_key, valid_val)
+            tgt_d = engine.get_target_date(s_key, valid_val, h_idx)
+            h_days = bounds["lead_days"]
+            slider_label = f"📅 Observation Date: {orig_d} (Window #{valid_val} of {max_idx}) · Target: {tgt_d} (+{h_days}d)"
+            slider_info = f"Valid Horizon Range: 0 to {max_idx} ({bounds['n_samples']} Windows) | 100% Cache Verified"
+            return slider_label, slider_info, max_idx, valid_val
+
         # Dynamic Smart Slider Adaptation Callbacks
         def on_split_change(split_label, horizon_label, cur_step):
-            s_key = SPLITS.get(split_label, "val")
-            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
-            bounds = engine.get_split_slider_bounds(s_key, h_idx)
-            new_step = min(int(cur_step), bounds["max_idx"])
-            clean_name = split_label.split("(")[0].strip()
-            slider_label = f"Smart Observation Slider ({clean_name}: {bounds['n_samples']} Windows)"
-            if bounds["n_observed"] < bounds["n_samples"]:
-                slider_info = f"Ground Truth: #0–#{bounds['last_obs_idx']} | Prognostic Future: #{bounds['last_obs_idx']+1}–#{bounds['max_idx']} (+{bounds['lead_days']}d Lead)"
-            else:
-                slider_info = f"Ground Truth Available across all {bounds['n_samples']} Windows (+{bounds['lead_days']}d Lead)"
-            return gr.update(maximum=bounds["max_idx"], value=new_step, label=slider_label, info=slider_info)
+            slider_label, slider_info, max_idx, valid_val = get_slider_labels(split_label, horizon_label, cur_step)
+            return gr.update(maximum=max_idx, value=valid_val, label=slider_label, info=slider_info)
 
         def on_horizon_change(split_label, horizon_label, cur_step):
-            s_key = SPLITS.get(split_label, "val")
-            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
-            bounds = engine.get_split_slider_bounds(s_key, h_idx)
-            clean_name = split_label.split("(")[0].strip()
-            slider_label = f"Smart Observation Slider ({clean_name}: {bounds['n_samples']} Windows)"
-            if bounds["n_observed"] < bounds["n_samples"]:
-                slider_info = f"Ground Truth: #0–#{bounds['last_obs_idx']} | Prognostic Future: #{bounds['last_obs_idx']+1}–#{bounds['max_idx']} (+{bounds['lead_days']}d Lead)"
-            else:
-                slider_info = f"Ground Truth Available across all {bounds['n_samples']} Windows (+{bounds['lead_days']}d Lead)"
-            return gr.update(info=slider_info, label=slider_label)
+            slider_label, slider_info, max_idx, valid_val = get_slider_labels(split_label, horizon_label, cur_step)
+            return gr.update(maximum=max_idx, value=valid_val, label=slider_label, info=slider_info)
 
-        def on_jump_first(): return 0
-        def on_prev(cur_val): return max(0, int(cur_val) - 1)
-        def on_next(cur_val, split_label):
-            s_key = SPLITS.get(split_label, "val")
-            bounds = engine.get_split_slider_bounds(s_key, 0)
-            return min(bounds["max_idx"], int(cur_val) + 1)
-        def on_jump_obs(split_label, horizon_label):
-            s_key = SPLITS.get(split_label, "val")
-            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
-            bounds = engine.get_split_slider_bounds(s_key, h_idx)
-            return bounds["last_obs_idx"]
-        def on_jump_latest(split_label):
-            s_key = SPLITS.get(split_label, "val")
-            bounds = engine.get_split_slider_bounds(s_key, 0)
-            return bounds["max_idx"]
+        def on_jump_first(split_label, horizon_label):
+            slider_label, slider_info, max_idx, valid_val = get_slider_labels(split_label, horizon_label, 0)
+            return gr.update(value=0, label=slider_label)
+
+        def on_prev(cur_val, split_label, horizon_label):
+            target_val = max(0, int(cur_val) - 1)
+            slider_label, slider_info, max_idx, valid_val = get_slider_labels(split_label, horizon_label, target_val)
+            return gr.update(value=valid_val, label=slider_label)
+
+        def on_next(cur_val, split_label, horizon_label):
+            target_val = int(cur_val) + 1
+            slider_label, slider_info, max_idx, valid_val = get_slider_labels(split_label, horizon_label, target_val)
+            return gr.update(value=valid_val, label=slider_label)
+
+        def on_jump_latest(split_label, horizon_label):
+            slider_label, slider_info, max_idx, valid_val = get_slider_labels(split_label, horizon_label, 999999)
+            return gr.update(value=valid_val, label=slider_label)
 
         render_inputs = [
             split_radio, step_slider, horizon_dropdown, pollutant_radio, region_dropdown,
@@ -811,9 +844,15 @@ def build_app(ckpt_path=None, cache_dir=None):
         ]
 
         def trigger_render(s_rad, s_step, h_drop, p_rad, r_drop, anom, diff, bio, pal):
-            return render_dashboard(engine, s_rad, s_step, h_drop, p_rad, r_drop, anom, diff, bio, pal)
+            s_key = SPLITS.get(s_rad, "val")
+            h_idx = HORIZON_LABELS.index(h_drop) if h_drop in HORIZON_LABELS else 0
+            bounds = engine.get_split_slider_bounds(s_key, h_idx)
+            valid_step = min(max(0, int(s_step)), bounds["max_idx"])
+            plot_img, metrics_md, badge_md = render_dashboard(engine, s_rad, valid_step, h_drop, p_rad, r_drop, anom, diff, bio, pal)
+            slider_label, slider_info, max_idx, _ = get_slider_labels(s_rad, h_drop, valid_step)
+            return gr.update(label=slider_label, maximum=max_idx), plot_img, metrics_md, badge_md
 
-        render_outputs = [plot_output, metrics_output, date_badge]
+        render_outputs = [step_slider, plot_output, metrics_output, date_badge]
 
         # Smart slider synchronization wiring
         split_radio.change(
@@ -828,11 +867,10 @@ def build_app(ckpt_path=None, cache_dir=None):
             outputs=[step_slider]
         ).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
 
-        first_btn.click(on_jump_first, outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
-        prev_btn.click(on_prev, inputs=[step_slider], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
-        next_btn.click(on_next, inputs=[step_slider, split_radio], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
-        jump_obs_btn.click(on_jump_obs, inputs=[split_radio, horizon_dropdown], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
-        latest_btn.click(on_jump_latest, inputs=[split_radio], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        first_btn.click(on_jump_first, inputs=[split_radio, horizon_dropdown], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        prev_btn.click(on_prev, inputs=[step_slider, split_radio, horizon_dropdown], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        next_btn.click(on_next, inputs=[step_slider, split_radio, horizon_dropdown], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        latest_btn.click(on_jump_latest, inputs=[split_radio, horizon_dropdown], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
 
         step_slider.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         pollutant_radio.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
