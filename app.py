@@ -37,8 +37,17 @@ try:
 except ImportError:
     HAS_GRADIO = False
 
-# Import model components if available in path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Candidate import search paths (prioritizing active engine modules)
+_this_dir = os.path.dirname(os.path.abspath(__file__))
+_airq_dirs = [
+    _this_dir,
+    r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\AirQ_DualClock",
+    os.path.join(_this_dir, "..", "AirQ_DualClock")
+]
+for _d in _airq_dirs:
+    if os.path.exists(_d) and _d not in sys.path:
+        sys.path.insert(0, _d)
+
 try:
     from dataset import DCDataset, collate
     from dcnet import DCNet, HORIZONS_DAYS, HORIZON_STEPS
@@ -61,12 +70,11 @@ POLLUTANTS = {
     "SO2": {"name": "Sulfur Dioxide",   "unit": "mol/m²", "scale": 1e-4, "disp_unit": "μmol/m²", "mult": 1e6}
 }
 
+# Significant relevant industrial and synoptic focus regions in Tamil Nadu
 REGIONS = {
     "Full State (Tamil Nadu 123x95)": None,
     "Chennai Metropolitan & Industrial Corridor": {"y": slice(8, 30), "x": slice(68, 93), "name": "Chennai Corridor"},
     "Kongu Industrial Belt (Coimbatore/Salem/Tiruppur)": {"y": slice(48, 80), "x": slice(18, 55), "name": "Kongu Belt"},
-    "Madurai & Vaigai Urban Basin": {"y": slice(75, 105), "x": slice(35, 65), "name": "Madurai Basin"},
-    "Neyveli & Cuddalore Lignite Thermal Corridor": {"y": slice(42, 65), "x": slice(65, 88), "name": "Neyveli Lignite"},
     "Tuticorin Port & Smelter Cluster": {"y": slice(95, 122), "x": slice(45, 75), "name": "Tuticorin Port"}
 }
 
@@ -134,14 +142,12 @@ class DualClockInferenceEngine:
         if path and os.path.exists(path) and os.path.getsize(path) > 1000000:
             return os.path.abspath(path)
         candidates = [
-            "best.pt",
-            "runs/dcnet_all_C_s0/best.pt",
-            "../AirQ_DualClock/best.pt",
             r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\AirQ_DualClock\best.pt",
+            "../AirQ_DualClock/best.pt",
+            "best.pt",
             "runs/dcnet_main/best.pt",
             "../AirQ_DualClock/runs/dcnet_main/best.pt",
-            "../AirQ_DualClock/kaggle_final_output/runs/dcnet_kaggle/best.pt",
-            r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\Adarsh[PHASE-1]\runs\dcnet_all_C_s0\best.pt"
+            "../AirQ_DualClock/kaggle_final_output/runs/dcnet_kaggle/best.pt"
         ]
         for c in candidates:
             if os.path.exists(c) and os.path.getsize(c) > 1000000:
@@ -152,9 +158,9 @@ class DualClockInferenceEngine:
         if path and os.path.exists(path) and os.path.exists(os.path.join(path, "meta.json")):
             return os.path.abspath(path)
         candidates = [
-            "cache",
-            "../AirQ_DualClock/cache",
             r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\AirQ_DualClock\cache",
+            "../AirQ_DualClock/cache",
+            "cache",
             "../cache"
         ]
         for c in candidates:
@@ -207,6 +213,42 @@ class DualClockInferenceEngine:
             y = base_years.get(split_key, 2024)
             date_strings = [f"{pd.Timestamp(f'{y}-01-01') + pd.Timedelta(days=5*i):%Y-%m-%d}" for i in range(n_samples)]
             return n_samples, date_strings
+
+    def get_split_slider_bounds(self, split_key, horizon_idx=0):
+        step = HORIZON_STEPS[horizon_idx] if horizon_idx < len(HORIZON_STEPS) else 1
+        h_days = HORIZONS_DAYS[horizon_idx] if horizon_idx < len(HORIZONS_DAYS) else 5
+
+        if self.is_live and split_key in self.datasets:
+            ds = self.datasets[split_key]
+            n_samples = len(ds.origins)
+            cache_end_date = f"{ds.ws[-1]:%Y-%m-%d}"
+            n_ws = len(ds.ws)
+            obs_indices = [i for i, org in enumerate(ds.origins) if org + step < n_ws]
+            last_obs_idx = obs_indices[-1] if obs_indices else 0
+            n_observed = len(obs_indices)
+        else:
+            counts = {"train": 354, "val": 73, "test": 130}
+            n_samples = counts.get(split_key, 73)
+            cache_end_date = "2026-10-11"
+            if split_key == "test":
+                test_origins = list(range(439, 569))
+                obs_indices = [i for i, org in enumerate(test_origins) if org + step < 569]
+                last_obs_idx = obs_indices[-1] if obs_indices else 0
+                n_observed = len(obs_indices)
+            else:
+                last_obs_idx = n_samples - 1
+                n_observed = n_samples
+
+        max_idx = max(0, n_samples - 1)
+        return {
+            "n_samples": n_samples,
+            "max_idx": max_idx,
+            "last_obs_idx": last_obs_idx,
+            "n_observed": n_observed,
+            "cache_end_date": cache_end_date,
+            "lead_days": h_days,
+            "lead_steps": step
+        }
 
     @torch.no_grad()
     def predict(self, split_key, sample_idx, horizon_step_idx, poll_name="NO2", region_key=None):
@@ -263,6 +305,7 @@ class DualClockInferenceEngine:
 
             origin_date = f"{ds.ws[ds.origins[sample_idx]]:%Y-%m-%d}"
             target_date = f"{ds.ws[ds.origins[sample_idx]] + pd.Timedelta(days=5*HORIZON_STEPS[horizon_step_idx]):%Y-%m-%d}"
+            cache_end_date = f"{ds.ws[-1]:%Y-%m-%d}"
 
             # Weather state estimation from real ERA5 batch
             org_idx = ds.origins[sample_idx]
@@ -358,6 +401,7 @@ class DualClockInferenceEngine:
             cur_dt = pd.Timestamp(f"{base_year}-01-01") + pd.Timedelta(days=5 * sample_idx)
             origin_date = f"{cur_dt:%Y-%m-%d}"
             target_date = f"{cur_dt + pd.Timedelta(days=5 * HORIZON_STEPS[horizon_step_idx]):%Y-%m-%d}"
+            cache_end_date = "2026-10-11"
 
             doy = (sample_idx * 5) % 365
             is_monsoon = 260 <= doy <= 340
@@ -384,7 +428,7 @@ class DualClockInferenceEngine:
         return dict(
             y_true=y_true, q50=q50, q10=q10, q90=q90, anomaly=anomaly,
             biophysical=biophysical, origin_date=origin_date, target_date=target_date,
-            pollutant=poll_name, weather=weather_state
+            cache_end_date=cache_end_date, pollutant=poll_name, weather=weather_state
         )
 
 
@@ -410,6 +454,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
     biophysical = res["biophysical"]
     wx = res["weather"]
     p_info = POLLUTANTS[poll_name]
+    cache_end_str = res.get("cache_end_date", "2026-10-11")
 
     # Metrics calculation
     valid_mask = np.isfinite(y_true) & np.isfinite(q50)
@@ -479,7 +524,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
                  color="#e2e8f0", fontsize=9.5, fontweight="bold", ha="center", va="center",
                  transform=ax1.transAxes,
                  bbox=dict(boxstyle="round,pad=0.6", facecolor="#18181b", edgecolor="#3f3f46", alpha=0.9))
-        ax1.text(0.5, 0.35, f"Target Date: {res['target_date']}\nSentinel-5P cache ends 2024-12-31",
+        ax1.text(0.5, 0.35, f"Target Date: {res['target_date']}\nSentinel-5P cache ends {cache_end_str}",
                  color="#94a3b8", fontsize=8, ha="center", va="center",
                  transform=ax1.transAxes)
         H_grid, W_grid = q50.shape
@@ -609,7 +654,13 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 * **Boundary Layer Height (BLH):** `{wx['blh']}` (Atmospheric Dispersion Depth) | **Relative Humidity:** `{wx['rh']}`
 """
 
-    badge_text = f"**Observation Window #{int(sample_idx)}** | **Origin:** `{res['origin_date']}`  -->  **Forecast Target:** `{res['target_date']}` ({horizon_label})"
+    cache_end_str = res.get("cache_end_date", "2026-10-11")
+    if has_gt:
+        status_tag = "<span style='color: #22c55e; font-weight: bold;'>[✓ Observed Ground Truth]</span>"
+    else:
+        status_tag = f"<span style='color: #f59e0b; font-weight: bold;'>[⚡ Prognostic Future Horizon (Beyond {cache_end_str})]</span>"
+
+    badge_text = f"**Observation Window #{int(sample_idx)}** &nbsp;|&nbsp; **Origin:** `{res['origin_date']}` &rarr; **Forecast Target:** `{res['target_date']}` ({horizon_label}) &nbsp; {status_tag}"
 
     return image_out, metrics_md, badge_text
 
@@ -673,22 +724,26 @@ def build_app(ckpt_path=None, cache_dir=None):
                     info="Val: 2024 Held-out, Test: 2025-2026 Extended, Train: 2019-2023"
                 )
 
-                n_init, init_dates = engine.get_split_info("val")
+                init_bounds = engine.get_split_slider_bounds("val", 0)
+                n_init = init_bounds["n_samples"]
 
                 step_slider = gr.Slider(
                     minimum=0,
-                    maximum=max(1, n_init - 1),
-                    value=min(42, n_init - 1),
+                    maximum=init_bounds["max_idx"],
+                    value=min(42, init_bounds["max_idx"]),
                     step=1,
-                    label="5-Day Observation Window Slider",
-                    info=f"Window Index (Total: {n_init} five-day epochs)"
+                    label=f"Smart Observation Slider (Validation: {n_init} Windows)",
+                    info=f"All {n_init} windows ground-truth verified across 2024 (100% Cache Coverage)"
                 )
 
                 date_badge = gr.Markdown("**Observation Window:** Initializing...")
 
                 with gr.Row():
+                    first_btn = gr.Button("⏮ First (#0)", size="sm")
                     prev_btn = gr.Button("◀ Prev", size="sm")
                     next_btn = gr.Button("Next ▶", size="sm")
+                    jump_obs_btn = gr.Button("⭐ Latest Observed", size="sm")
+                    latest_btn = gr.Button("⏭ Latest Forecast", size="sm")
 
                 palette_dropdown = gr.Dropdown(
                     choices=["viridis", "turbo", "plasma", "inferno", "coolwarm"],
@@ -708,26 +763,47 @@ def build_app(ckpt_path=None, cache_dir=None):
                 plot_output = gr.Image(label="2D Spatial Pollution Contour Comparison", type="pil")
                 metrics_output = gr.Markdown()
 
-        # Callbacks
-        def on_split_change(split_label):
+        # Dynamic Smart Slider Adaptation Callbacks
+        def on_split_change(split_label, horizon_label, cur_step):
             s_key = SPLITS.get(split_label, "val")
-            n_samp, date_strings = engine.get_split_info(s_key)
-            new_max = max(1, n_samp - 1)
-            default_val = min(42, new_max)
-            dt_str = date_strings[default_val] if default_val < len(date_strings) else ""
-            badge_text = f"**Observation Window #{default_val} ({split_label}):** `{dt_str}`"
-            return gr.update(maximum=new_max, value=default_val, info=f"Window Index (Total: {n_samp} epochs)"), badge_text
+            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
+            bounds = engine.get_split_slider_bounds(s_key, h_idx)
+            new_step = min(int(cur_step), bounds["max_idx"])
+            clean_name = split_label.split("(")[0].strip()
+            slider_label = f"Smart Observation Slider ({clean_name}: {bounds['n_samples']} Windows)"
+            if bounds["n_observed"] < bounds["n_samples"]:
+                slider_info = f"Ground Truth: #0–#{bounds['last_obs_idx']} | Prognostic Future: #{bounds['last_obs_idx']+1}–#{bounds['max_idx']} (+{bounds['lead_days']}d Lead)"
+            else:
+                slider_info = f"Ground Truth Available across all {bounds['n_samples']} Windows (+{bounds['lead_days']}d Lead)"
+            return gr.update(maximum=bounds["max_idx"], value=new_step, label=slider_label, info=slider_info)
 
-        split_radio.change(on_split_change, inputs=[split_radio], outputs=[step_slider, date_badge])
+        def on_horizon_change(split_label, horizon_label, cur_step):
+            s_key = SPLITS.get(split_label, "val")
+            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
+            bounds = engine.get_split_slider_bounds(s_key, h_idx)
+            clean_name = split_label.split("(")[0].strip()
+            slider_label = f"Smart Observation Slider ({clean_name}: {bounds['n_samples']} Windows)"
+            if bounds["n_observed"] < bounds["n_samples"]:
+                slider_info = f"Ground Truth: #0–#{bounds['last_obs_idx']} | Prognostic Future: #{bounds['last_obs_idx']+1}–#{bounds['max_idx']} (+{bounds['lead_days']}d Lead)"
+            else:
+                slider_info = f"Ground Truth Available across all {bounds['n_samples']} Windows (+{bounds['lead_days']}d Lead)"
+            return gr.update(info=slider_info, label=slider_label)
 
+        def on_jump_first(): return 0
         def on_prev(cur_val): return max(0, int(cur_val) - 1)
         def on_next(cur_val, split_label):
             s_key = SPLITS.get(split_label, "val")
-            n_samp, _ = engine.get_split_info(s_key)
-            return min(n_samp - 1, int(cur_val) + 1)
-
-        prev_btn.click(on_prev, inputs=[step_slider], outputs=[step_slider])
-        next_btn.click(on_next, inputs=[step_slider, split_radio], outputs=[step_slider])
+            bounds = engine.get_split_slider_bounds(s_key, 0)
+            return min(bounds["max_idx"], int(cur_val) + 1)
+        def on_jump_obs(split_label, horizon_label):
+            s_key = SPLITS.get(split_label, "val")
+            h_idx = HORIZON_LABELS.index(horizon_label) if horizon_label in HORIZON_LABELS else 0
+            bounds = engine.get_split_slider_bounds(s_key, h_idx)
+            return bounds["last_obs_idx"]
+        def on_jump_latest(split_label):
+            s_key = SPLITS.get(split_label, "val")
+            bounds = engine.get_split_slider_bounds(s_key, 0)
+            return bounds["max_idx"]
 
         render_inputs = [
             split_radio, step_slider, horizon_dropdown, pollutant_radio, region_dropdown,
@@ -739,15 +815,33 @@ def build_app(ckpt_path=None, cache_dir=None):
 
         render_outputs = [plot_output, metrics_output, date_badge]
 
-        run_btn.click(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        # Smart slider synchronization wiring
+        split_radio.change(
+            on_split_change,
+            inputs=[split_radio, horizon_dropdown, step_slider],
+            outputs=[step_slider]
+        ).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+
+        horizon_dropdown.change(
+            on_horizon_change,
+            inputs=[split_radio, horizon_dropdown, step_slider],
+            outputs=[step_slider]
+        ).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+
+        first_btn.click(on_jump_first, outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        prev_btn.click(on_prev, inputs=[step_slider], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        next_btn.click(on_next, inputs=[step_slider, split_radio], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        jump_obs_btn.click(on_jump_obs, inputs=[split_radio, horizon_dropdown], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        latest_btn.click(on_jump_latest, inputs=[split_radio], outputs=[step_slider]).then(trigger_render, inputs=render_inputs, outputs=render_outputs)
+
         step_slider.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
-        horizon_dropdown.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         pollutant_radio.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         region_dropdown.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         show_anom_cb.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         show_diff_cb.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         show_bio_cb.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
         palette_dropdown.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        run_btn.click(trigger_render, inputs=render_inputs, outputs=render_outputs)
 
         demo.load(trigger_render, inputs=render_inputs, outputs=render_outputs)
 
