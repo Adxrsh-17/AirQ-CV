@@ -101,13 +101,14 @@ class DualClockInferenceEngine:
         self.H5, self.W5 = 123, 95
         self.s2_ratio = 8
         self.ckpt_path = self._resolve_checkpoint(ckpt_path)
-        self.cache_dir = cache_dir
+        self.cache_dir = self._resolve_cache(cache_dir)
 
-        if self.ckpt_path and os.path.exists(self.ckpt_path) and cache_dir and os.path.exists(cache_dir) and HAS_DCNET:
+        if self.ckpt_path and os.path.exists(self.ckpt_path) and self.cache_dir and os.path.exists(self.cache_dir) and HAS_DCNET:
             try:
                 self._load_live_model()
                 self.is_live = True
                 print(f"[Engine] Successfully loaded live Dual-Clock checkpoint from {self.ckpt_path} on {dev}.")
+                print(f"[Engine] Dataset cache active at {self.cache_dir} with splits: {list(self.datasets.keys())}.")
             except Exception as e:
                 print(f"[Engine Warning] Live model load exception ({e}). Operating in calibrated Tamil Nadu simulation mode.")
                 self.is_live = False
@@ -115,17 +116,36 @@ class DualClockInferenceEngine:
             print("[Engine] Operating in calibrated Tamil Nadu empirical simulation mode.")
 
     def _resolve_checkpoint(self, path):
-        if path and os.path.exists(path): return path
+        if path and os.path.exists(path) and os.path.getsize(path) > 1000000:
+            return os.path.abspath(path)
         candidates = [
+            "best.pt",
             "runs/dcnet_all_C_s0/best.pt",
+            "../AirQ_DualClock/best.pt",
+            r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\AirQ_DualClock\best.pt",
             "runs/dcnet_main/best.pt",
             "../AirQ_DualClock/runs/dcnet_main/best.pt",
-            "../AirQ_DualClock/kaggle_final_output/runs/dcnet_kaggle/best.pt"
+            "../AirQ_DualClock/kaggle_final_output/runs/dcnet_kaggle/best.pt",
+            r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\Adarsh[PHASE-1]\runs\dcnet_all_C_s0\best.pt"
         ]
         for c in candidates:
             if os.path.exists(c) and os.path.getsize(c) > 1000000:
-                return c
+                return os.path.abspath(c)
         return None
+
+    def _resolve_cache(self, path):
+        if path and os.path.exists(path) and os.path.exists(os.path.join(path, "meta.json")):
+            return os.path.abspath(path)
+        candidates = [
+            "cache",
+            "../AirQ_DualClock/cache",
+            r"C:\Users\Adarsh_Pradeep\OneDrive\Desktop\4th Yr Sem 7\Project Phase 1\Projects\AirQ_DualClock\cache",
+            "../cache"
+        ]
+        for c in candidates:
+            if os.path.exists(c) and os.path.exists(os.path.join(c, "meta.json")):
+                return os.path.abspath(c)
+        return path or "cache"
 
     def _load_live_model(self):
         ckpt = torch.load(self.ckpt_path, map_location=self.dev, weights_only=False)
@@ -156,6 +176,11 @@ class DualClockInferenceEngine:
             n_samples = len(ds.origins)
             date_strings = [f"{ds.ws[o]:%Y-%m-%d} to {ds.we[o]:%Y-%m-%d}" for o in ds.origins]
             return n_samples, date_strings
+        elif self.is_live and self.datasets:
+            ds = next(iter(self.datasets.values()))
+            n_samples = len(ds.origins)
+            date_strings = [f"{ds.ws[o]:%Y-%m-%d} to {ds.we[o]:%Y-%m-%d}" for o in ds.origins]
+            return n_samples, date_strings
         else:
             counts = {"train": 365, "val": 73, "test": 131}
             n_samples = counts.get(split_key, 73)
@@ -170,8 +195,14 @@ class DualClockInferenceEngine:
         p_idx = poll_keys.index(poll_name) if poll_name in poll_keys else 0
 
         # Live model execution if mounted
-        if self.is_live and split_key in self.datasets:
-            ds = self.datasets[split_key]
+        if self.is_live and self.datasets:
+            # Fallback to mounted split if requested split is empty
+            if split_key not in self.datasets or len(self.datasets[split_key].origins) == 0:
+                active_split = "val" if "val" in self.datasets else next(iter(self.datasets.keys()))
+            else:
+                active_split = split_key
+
+            ds = self.datasets[active_split]
             sample_idx = max(0, min(sample_idx, len(ds.origins) - 1))
             b_raw = ds[sample_idx]
             b = collate([b_raw])
@@ -193,17 +224,49 @@ class DualClockInferenceEngine:
             y_true = np.where(ym > 0, self.s5_norm.inv(y_z, c) if self.s5_norm else y_z, np.nan)
 
             # Anomaly w.r.t harmonic climatology
-            clim_z = b.get("clim", torch.zeros_like(b["y"]))[0, horizon_step_idx, c, :H, :W].cpu().numpy()
+            clim_tensor = b.get("clim_tgt", b.get("clim", torch.zeros_like(b["y"])))
+            clim_z = clim_tensor[0, horizon_step_idx, c, :H, :W].cpu().numpy()
             clim = self.s5_norm.inv(clim_z, c) if self.s5_norm else clim_z
             anomaly = q50 - clim
 
             # S2 Biophysical NDBI
             r = self.s2_ratio
-            s2_data = b.get("s2", torch.zeros((1, 38, H*r, W*r)))[0].cpu().numpy()
-            biophysical = s2_data[12, :H*r, :W*r] if s2_data.shape[0] > 12 else np.zeros((H*r, W*r))
+            s2_tensor = b.get("s2", None)
+            if s2_tensor is not None and s2_tensor.shape[1] > 12:
+                biophysical = s2_tensor[0, 12, :H*r, :W*r].cpu().numpy()
+            else:
+                biophysical = np.zeros((H*r, W*r), dtype=np.float32)
 
             origin_date = f"{ds.ws[ds.origins[sample_idx]]:%Y-%m-%d}"
             target_date = f"{ds.ws[ds.origins[sample_idx]] + pd.Timedelta(days=5*HORIZON_STEPS[horizon_step_idx]):%Y-%m-%d}"
+
+            # Weather state estimation from real ERA5 batch
+            doy = (sample_idx * 5) % 365
+            is_monsoon = 260 <= doy <= 340
+            wx_raw = b.get("wx", None)
+            if wx_raw is not None and wx_raw.numel() >= 8:
+                last_8 = wx_raw[0, -8:].cpu().numpy()
+                t2m = float(last_8[0])
+                t_c = t2m - 273.15 if t2m > 150 else t2m
+                ws = float(math.hypot(last_8[1], last_8[2]))
+                wdir = f"SW Trade ({math.degrees(math.atan2(-last_8[1], -last_8[2])) % 360:.0f}°)"
+                blh = f"{abs(float(last_8[4])):.0f} m"
+                rh = f"{float(last_8[7]):.0f} %" if len(last_8) > 7 else ("84 %" if is_monsoon else "62 %")
+                weather_state = {
+                    "temp": f"{t_c:.1f} °C",
+                    "wind_speed": f"{ws:.1f} m/s",
+                    "wind_dir": wdir,
+                    "blh": blh,
+                    "rh": rh
+                }
+            else:
+                weather_state = {
+                    "temp": f"{28.5 + 4.5 * math.sin(doy * 2 * math.pi / 365):.1f} °C",
+                    "wind_speed": f"{3.8 + 2.2 * math.sin(doy * 2 * math.pi / 180):.1f} m/s",
+                    "wind_dir": "NE Monsoon (045°)" if is_monsoon else "SW Trade Wind (220°)",
+                    "blh": f"{1200 + 400 * math.cos(doy * 2 * math.pi / 365):.0f} m",
+                    "rh": "84 %" if is_monsoon else "62 %"
+                }
 
         else:
             # Calibrated Empirical Physics Simulation of Tamil Nadu State Grid (123 x 95)
@@ -266,6 +329,16 @@ class DualClockInferenceEngine:
             origin_date = f"{cur_dt:%Y-%m-%d}"
             target_date = f"{cur_dt + pd.Timedelta(days=5 * HORIZON_STEPS[horizon_step_idx]):%Y-%m-%d}"
 
+            doy = (sample_idx * 5) % 365
+            is_monsoon = 260 <= doy <= 340
+            weather_state = {
+                "temp": f"{28.5 + 4.5 * math.sin(doy * 2 * math.pi / 365):.1f} °C",
+                "wind_speed": f"{3.8 + 2.2 * math.sin(doy * 2 * math.pi / 180):.1f} m/s",
+                "wind_dir": "NE Monsoon (045°)" if is_monsoon else "SW Trade Wind (220°)",
+                "blh": f"{1200 + 400 * math.cos(doy * 2 * math.pi / 365):.0f} m",
+                "rh": "84 %" if is_monsoon else "62 %"
+            }
+
         # Apply Regional Crop if selected
         if region_key and region_key in REGIONS and REGIONS[region_key] is not None:
             r_crop = REGIONS[region_key]
@@ -277,17 +350,6 @@ class DualClockInferenceEngine:
             anomaly = anomaly[y_s, x_s]
             r = self.s2_ratio
             biophysical = biophysical[y_s.start*r:y_s.stop*r, x_s.start*r:x_s.stop*r]
-
-        # Weather state estimation for origin window
-        doy = (sample_idx * 5) % 365
-        is_monsoon = 260 <= doy <= 340
-        weather_state = {
-            "temp": f"{28.5 + 4.5 * math.sin(doy * 2 * math.pi / 365):.1f} °C",
-            "wind_speed": f"{3.8 + 2.2 * math.sin(doy * 2 * math.pi / 180):.1f} m/s",
-            "wind_dir": "NE Monsoon (045°)" if is_monsoon else "SW Trade Wind (220°)",
-            "blh": f"{1200 + 400 * math.cos(doy * 2 * math.pi / 365):.0f} m",
-            "rh": "84 %" if is_monsoon else "62 %"
-        }
 
         return dict(
             y_true=y_true, q50=q50, q10=q10, q90=q90, anomaly=anomaly,
@@ -349,72 +411,93 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
     if show_diff: n_cols += 1
     if show_bio: n_cols += 1
 
-    fig = plt.figure(figsize=(4.6 * n_cols, 5.0), dpi=140, facecolor="#0a0d14")
+    fig = plt.figure(figsize=(4.6 * n_cols, 5.0), dpi=140, facecolor="#000000")
     gs = gridspec.GridSpec(1, n_cols, wspace=0.32, top=0.85, bottom=0.12, left=0.06, right=0.94)
 
     curr_col = 0
 
     # Panel 1: True S5P
     ax1 = fig.add_subplot(gs[0, curr_col])
+    ax1.set_facecolor("#000000")
     im1 = ax1.imshow(y_true * p_info["mult"], cmap=color_palette, vmin=vmin * p_info["mult"], vmax=vmax * p_info["mult"], interpolation="nearest")
-    ax1.set_title(f"True {poll_name} (Sentinel-5P)", color="#f8fafc", fontsize=11, fontweight="bold", pad=8)
-    ax1.set_ylabel(f"{region_label.split('(')[0].strip()}\nWindow #{int(sample_idx)}", color="#94a3b8", fontsize=9, fontweight="bold")
-    ax1.tick_params(colors="#64748b", labelsize=8)
+    ax1.set_title(f"True {poll_name} (Sentinel-5P)", color="#ffffff", fontsize=11, fontweight="bold", pad=8)
+    ax1.set_ylabel(f"{region_label.split('(')[0].strip()}\nWindow #{int(sample_idx)}", color="#aaaaaa", fontsize=9, fontweight="bold")
+    ax1.tick_params(colors="#666666", labelsize=8)
     cb1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-    cb1.ax.tick_params(colors="#94a3b8", labelsize=7)
-    cb1.set_label(p_info["disp_unit"], color="#94a3b8", fontsize=8)
+    cb1.ax.tick_params(colors="#aaaaaa", labelsize=7)
+    cb1.set_label(p_info["disp_unit"], color="#aaaaaa", fontsize=8)
     curr_col += 1
 
     # Panel 2: DC-Net Prediction
     ax2 = fig.add_subplot(gs[0, curr_col])
+    ax2.set_facecolor("#000000")
     im2 = ax2.imshow(q50 * p_info["mult"], cmap=color_palette, vmin=vmin * p_info["mult"], vmax=vmax * p_info["mult"], interpolation="bilinear")
-    ax2.set_title(f"DC-Net Forecast (+{h_days}d)", color="#38bdf8", fontsize=11, fontweight="bold", pad=8)
-    ax2.tick_params(colors="#64748b", labelsize=8)
+    ax2.set_title(f"DC-Net Forecast (+{h_days}d)", color="#60a5fa", fontsize=11, fontweight="bold", pad=8)
+    ax2.tick_params(colors="#666666", labelsize=8)
     cb2 = fig.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
-    cb2.ax.tick_params(colors="#94a3b8", labelsize=7)
-    cb2.set_label(p_info["disp_unit"], color="#94a3b8", fontsize=8)
+    cb2.ax.tick_params(colors="#aaaaaa", labelsize=7)
+    cb2.set_label(p_info["disp_unit"], color="#aaaaaa", fontsize=8)
     curr_col += 1
+
+    # Landmark city overlays
+    for c_info in CITIES_TN:
+        gx, gy = c_info["grid_x"], c_info["grid_y"]
+        if region_label and region_label in REGIONS and REGIONS[region_label] is not None:
+            r_crop = REGIONS[region_label]
+            if r_crop["x"].start <= gx < r_crop["x"].stop and r_crop["y"].start <= gy < r_crop["y"].stop:
+                lx = gx - r_crop["x"].start
+                ly = gy - r_crop["y"].start
+                for ax_c in (ax1, ax2):
+                    ax_c.plot(lx, ly, 'o', color='#ffffff', markersize=4, markeredgecolor='#000000', markeredgewidth=1)
+                    ax_c.text(lx + 0.8, ly + 0.8, c_info["name"], color='#ffffff', fontsize=7.5, fontweight='bold')
+        else:
+            for ax_c in (ax1, ax2):
+                ax_c.plot(gx, gy, 'o', color='#ffffff', markersize=4, markeredgecolor='#000000', markeredgewidth=1)
+                ax_c.text(gx + 1.2, gy + 1.2, c_info["name"], color='#ffffff', fontsize=7.5, fontweight='bold')
 
     # Panel 3 (Optional): Anomaly w.r.t Harmonic Climatology
     if show_anomaly:
         ax3 = fig.add_subplot(gs[0, curr_col])
+        ax3.set_facecolor("#000000")
         anom_max = float(np.nanpercentile(np.abs(anomaly * p_info["mult"]), 98)) + 1e-6
         im3 = ax3.imshow(anomaly * p_info["mult"], cmap="coolwarm", vmin=-anom_max, vmax=anom_max, interpolation="nearest")
-        ax3.set_title("Forecast Anomaly (vs Climatology)", color="#a855f7", fontsize=11, fontweight="bold", pad=8)
-        ax3.tick_params(colors="#64748b", labelsize=8)
+        ax3.set_title("Forecast Anomaly (vs Climatology)", color="#c084fc", fontsize=11, fontweight="bold", pad=8)
+        ax3.tick_params(colors="#666666", labelsize=8)
         cb3 = fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
-        cb3.ax.tick_params(colors="#94a3b8", labelsize=7)
-        cb3.set_label(f"Δ {p_info['disp_unit']}", color="#94a3b8", fontsize=8)
+        cb3.ax.tick_params(colors="#aaaaaa", labelsize=7)
+        cb3.set_label(f"Δ {p_info['disp_unit']}", color="#aaaaaa", fontsize=8)
         curr_col += 1
 
     # Panel 4 (Optional): Residual Error Map
     if show_diff:
         ax4 = fig.add_subplot(gs[0, curr_col])
+        ax4.set_facecolor("#000000")
         diff = (q50 - y_true) * p_info["mult"]
         diff_max = float(np.nanpercentile(np.abs(diff), 98)) + 1e-6
         im4 = ax4.imshow(diff, cmap="bwr", vmin=-diff_max, vmax=diff_max, interpolation="nearest")
-        ax4.set_title("Residual Error (Pred - True)", color="#f43f5e", fontsize=11, fontweight="bold", pad=8)
-        ax4.tick_params(colors="#64748b", labelsize=8)
+        ax4.set_title("Residual Error (Pred - True)", color="#f87171", fontsize=11, fontweight="bold", pad=8)
+        ax4.tick_params(colors="#666666", labelsize=8)
         cb4 = fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
-        cb4.ax.tick_params(colors="#94a3b8", labelsize=7)
-        cb4.set_label(f"Error ({p_info['disp_unit']})", color="#94a3b8", fontsize=8)
+        cb4.ax.tick_params(colors="#aaaaaa", labelsize=7)
+        cb4.set_label(f"Error ({p_info['disp_unit']})", color="#aaaaaa", fontsize=8)
         curr_col += 1
 
     # Panel 5 (Optional): Sentinel-2 Biophysical Prior
     if show_bio:
         ax5 = fig.add_subplot(gs[0, curr_col])
+        ax5.set_facecolor("#000000")
         im5 = ax5.imshow(biophysical, cmap="magma", vmin=-0.4, vmax=0.65, interpolation="bilinear")
-        ax5.set_title("Sentinel-2 NDBI Prior (~600m)", color="#f59e0b", fontsize=11, fontweight="bold", pad=8)
-        ax5.tick_params(colors="#64748b", labelsize=8)
+        ax5.set_title("Sentinel-2 NDBI Prior (~600m)", color="#fbbf24", fontsize=11, fontweight="bold", pad=8)
+        ax5.tick_params(colors="#666666", labelsize=8)
         cb5 = fig.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
-        cb5.ax.tick_params(colors="#94a3b8", labelsize=7)
-        cb5.set_label("NDBI Index [-1, 1]", color="#94a3b8", fontsize=8)
+        cb5.ax.tick_params(colors="#aaaaaa", labelsize=7)
+        cb5.set_label("NDBI Index [-1, 1]", color="#aaaaaa", fontsize=8)
         curr_col += 1
 
     # Overall Supertitle
     fig.suptitle(
         f"AirQ-CV | {p_info['name']} ({poll_name}) | Origin: {res['origin_date']}  ⟶  Target: {res['target_date']} ({horizon_label})",
-        color="#f8fafc", fontsize=13, fontweight="bold", y=0.97
+        color="#ffffff", fontsize=13, fontweight="bold", y=0.97
     )
 
     buf = io.BytesIO()
@@ -425,7 +508,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 
     # Markdown Telemetry & Scorecard
     metrics_md = f"""
-### 📊 Dual-Clock Performance Scorecard ({poll_name} at +{h_days} Days)
+### Dual-Clock Performance Scorecard ({poll_name} at +{h_days} Days)
 
 | Evaluation Metric | Model Score | Benchmark Reference | Physical Meaning |
 | :--- | :--- | :--- | :--- |
@@ -436,7 +519,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 | **Mean Absolute Error (MAE)** | **`{mae:.2e} {p_info['unit']}`** | SI Standard | Absolute pixel-level error across land surface |
 
 ---
-#### 💨 Fast-Clock Synoptic Weather Telemetry (ERA5 at Forecast Origin)
+#### Fast-Clock Synoptic Weather Telemetry (ERA5 at Forecast Origin)
 * **Surface 2m Temperature:** `{wx['temp']}` | **Wind Velocity & Direction:** `{wx['wind_speed']}` (`{wx['wind_dir']}`)
 * **Boundary Layer Height (BLH):** `{wx['blh']}` (Atmospheric Dispersion Depth) | **Relative Humidity:** `{wx['rh']}`
 """
@@ -450,25 +533,21 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 def build_app(ckpt_path=None, cache_dir=None):
     engine = DualClockInferenceEngine(ckpt_path, cache_dir)
 
-    theme = gr.themes.Soft(
-        primary_hue="sky",
-        secondary_hue="indigo",
-        neutral_hue="slate",
-    ).set(
-        body_background_fill="#070a12",
-        block_background_fill="#0f1624",
+    theme = gr.themes.Base().set(
+        body_background_fill="#000000",
+        block_background_fill="#0a0a0a",
         block_border_width="1px",
-        block_border_color="#1c2a45",
-        button_primary_background_fill="#0284c7",
+        block_border_color="#222222",
+        button_primary_background_fill="#2563eb",
         button_primary_text_color="#ffffff",
     )
 
-    with gr.Blocks(title="AirQ-CV Dual-Clock Inference Dashboard", theme=theme) as demo:
+    with gr.Blocks(title="AirQ-CV Dual-Clock Inference Dashboard") as demo:
         gr.Markdown(
             """
             # 🛰️ AirQ-CV: Dual-Clock DC-Net Satellite Pollution Dashboard
             ### State-Wide Tamil Nadu ($123 \\times 95$ Grid) with Sentinel-2 High-Resolution Biophysical Disaggregation
-            *Seamlessly navigate and evaluate prognostic forecasts across **NO₂**, **CO**, and **SO₂**.*
+            *Empowered Multi-Gas & Multi-Horizon Spatial Telemetry Dashboard for **NO₂**, **CO**, and **SO₂**.*
             """
         )
 
@@ -480,21 +559,21 @@ def build_app(ckpt_path=None, cache_dir=None):
                 pollutant_radio = gr.Radio(
                     choices=list(POLLUTANTS.keys()),
                     value="NO2",
-                    label="🎯 Target Atmospheric Trace Gas",
+                    label="Target Atmospheric Trace Gas",
                     info="NO₂ (Urban/Traffic), CO (Combustion), SO₂ (Thermal/Smelter Plumes)"
                 )
 
                 horizon_dropdown = gr.Dropdown(
                     choices=HORIZON_LABELS,
                     value=HORIZON_LABELS[0],
-                    label="⏱️ Forecast Horizon (Lead Time)",
+                    label="Forecast Horizon (Lead Time)",
                     info="Prediction lead time from +5 days up to +120 days"
                 )
 
                 region_dropdown = gr.Dropdown(
                     choices=list(REGIONS.keys()),
                     value="Full State (Tamil Nadu 123x95)",
-                    label="🗺️ Spatial Bounding Box / Focus Region",
+                    label="Spatial Bounding Box / Focus Region",
                     info="State-wide view or regional industrial cluster zoom"
                 )
 
@@ -503,7 +582,7 @@ def build_app(ckpt_path=None, cache_dir=None):
                 split_radio = gr.Radio(
                     choices=list(SPLITS.keys()),
                     value="Validation (2024 Held-Out Year)",
-                    label="📂 Dataset Partition Split",
+                    label="Dataset Partition Split",
                     info="Val: 2024 Held-out, Test: 2025-2026 Extended, Train: 2019-2023"
                 )
 
@@ -514,7 +593,7 @@ def build_app(ckpt_path=None, cache_dir=None):
                     maximum=max(1, n_init - 1),
                     value=min(42, n_init - 1),
                     step=1,
-                    label="⏱️ 5-Day Observation Window Slider",
+                    label="5-Day Observation Window Slider",
                     info=f"Window Index (Total: {n_init} five-day epochs)"
                 )
 
@@ -525,10 +604,10 @@ def build_app(ckpt_path=None, cache_dir=None):
                 palette_dropdown = gr.Dropdown(
                     choices=["viridis", "turbo", "plasma", "inferno", "coolwarm"],
                     value="viridis",
-                    label="🎨 False-Color Scientific Colormap"
+                    label="False-Color Scientific Colormap"
                 )
 
-                gr.Markdown("### 👁️ Dual-Clock Feature Overlays")
+                gr.Markdown("### Dual-Clock Feature Overlays")
                 show_anom_cb = gr.Checkbox(value=True, label="Show Harmonic Climatology Anomaly Map")
                 show_diff_cb = gr.Checkbox(value=True, label="Show Residual Error Heatmap (|Pred - True|)")
                 show_bio_cb = gr.Checkbox(value=True, label="Show Sentinel-2 Biophysical NDBI Urban Prior (~600m)")
@@ -584,8 +663,8 @@ def build_app(ckpt_path=None, cache_dir=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AirQ-CV Gradio Inference UI")
-    parser.add_argument("--ckpt", default="runs/dcnet_all_C_s0/best.pt", help="Path to best.pt checkpoint")
-    parser.add_argument("--cache", default="cache", help="Path to cache directory")
+    parser.add_argument("--ckpt", default=None, help="Path to best.pt checkpoint")
+    parser.add_argument("--cache", default=None, help="Path to cache directory")
     parser.add_argument("--port", type=int, default=7860, help="Local server port")
     parser.add_argument("--share", action="store_true", help="Generate public Gradio link")
     args = parser.parse_args()
