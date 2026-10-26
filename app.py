@@ -478,6 +478,9 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
         ax1.text(0.5, 0.35, f"Target Date: {res['target_date']}\nSentinel-5P cache ends 2024-12-31",
                  color="#94a3b8", fontsize=8, ha="center", va="center",
                  transform=ax1.transAxes)
+        H_grid, W_grid = q50.shape
+        ax1.set_xlim(0, W_grid)
+        ax1.set_ylim(H_grid, 0)
         sm = plt.cm.ScalarMappable(cmap=color_palette, norm=plt.Normalize(vmin=vmin * p_info["mult"], vmax=vmax * p_info["mult"]))
         sm.set_array([])
         cb1 = fig.colorbar(sm, ax=ax1, fraction=0.046, pad=0.04)
@@ -622,7 +625,8 @@ def build_app(ckpt_path=None, cache_dir=None):
         button_primary_text_color="#ffffff",
     )
 
-    with gr.Blocks(title="AirQ-CV Dual-Clock Inference Dashboard", theme=theme) as demo:
+    with gr.Blocks(title="AirQ-CV Dual-Clock Inference Dashboard") as demo:
+        demo.theme = theme
         gr.Markdown(
             """
             # AirQ-CV | Dual-Clock Satellite Forecasting Engine
