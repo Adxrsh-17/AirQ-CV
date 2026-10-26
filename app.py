@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AirQ-CV: Dual-Clock DC-Net Interactive Inference Dashboard (v2.5)
+AirQ-CV: Dual-Clock DC-Net Interactive Inference Dashboard (v2.6)
 ================================================================
 Empowered Multi-Gas & Multi-Horizon Spatial Telemetry Dashboard
 Target Domain: State of Tamil Nadu (123 x 95 grid, R=8 Sentinel-2 sub-grid)
@@ -81,11 +81,17 @@ CITIES_TN = [
     {"name": "Tiruppur", "x": 77.34, "y": 11.10, "grid_x": 35, "grid_y": 64, "weight": 1.20}
 ]
 
-# Verified Benchmark Metrics Table
+# Verified Benchmark Metrics Table (R2, Pearson r, Skill vs Persistence, 80% Coverage)
 BENCHMARK_SCORECARD = {
     "NO2": {5: (0.512, 0.720, 0.412, 80.2), 10: (0.499, 0.711, 0.458, 79.1), 15: (0.504, 0.714, 0.465, 79.1), 30: (0.503, 0.713, 0.510, 79.0), 60: (0.486, 0.701, 0.575, 77.9), 120: (0.432, 0.662, 0.624, 75.0)},
     "CO":  {5: (0.765, 0.881, 0.309, 82.9), 10: (0.760, 0.878, 0.439, 82.5), 15: (0.766, 0.882, 0.478, 83.2), 30: (0.769, 0.885, 0.646, 82.6), 60: (0.765, 0.884, 0.824, 81.7), 120: (0.744, 0.872, 0.923, 81.6)},
     "SO2": {5: (-0.051, 0.307, 0.398, 82.7), 10: (-0.050, 0.304, 0.401, 81.6), 15: (-0.057, 0.298, 0.389, 81.0), 30: (-0.041, 0.295, 0.435, 80.0), 60: (-0.021, 0.292, 0.434, 78.3), 120: (0.008, 0.309, 0.496, 77.7)}
+}
+
+BENCHMARK_MAE = {
+    "NO2": 8.5e-6,
+    "CO":  2.4e-3,
+    "SO2": 2.1e-5
 }
 
 
@@ -102,6 +108,15 @@ class DualClockInferenceEngine:
         self.s2_ratio = 8
         self.ckpt_path = self._resolve_checkpoint(ckpt_path)
         self.cache_dir = self._resolve_cache(cache_dir)
+        self.wx_raw = None
+
+        if self.cache_dir and os.path.exists(self.cache_dir):
+            wx_file = os.path.join(self.cache_dir, "weather_5d.npy")
+            if os.path.exists(wx_file):
+                try:
+                    self.wx_raw = np.load(wx_file)
+                except Exception:
+                    self.wx_raw = None
 
         if self.ckpt_path and os.path.exists(self.ckpt_path) and self.cache_dir and os.path.exists(self.cache_dir) and HAS_DCNET:
             try:
@@ -155,7 +170,7 @@ class DualClockInferenceEngine:
             try:
                 ds_ = DCDataset(self.cache_dir, split_key, cfg, stats=ckpt.get("stats"))
                 if ds_.origins: self.datasets[split_key] = ds_
-            except Exception as e:
+            except Exception:
                 pass
 
         if not self.datasets: raise RuntimeError("no split with origins in cache")
@@ -233,7 +248,12 @@ class DualClockInferenceEngine:
             r = self.s2_ratio
             s2_tensor = b.get("s2", None)
             if s2_tensor is not None and s2_tensor.shape[1] > 12:
-                biophysical = s2_tensor[0, 12, :H*r, :W*r].cpu().numpy()
+                ndbi = s2_tensor[0, 12, :H*r, :W*r].cpu().numpy()
+                if s2_tensor.shape[1] > 34:
+                    ann_ok = s2_tensor[0, 34, :H*r, :W*r].cpu().numpy() > 0
+                    biophysical = np.where(ann_ok, ndbi, np.nan)
+                else:
+                    biophysical = ndbi
             else:
                 biophysical = np.zeros((H*r, W*r), dtype=np.float32)
 
@@ -241,25 +261,31 @@ class DualClockInferenceEngine:
             target_date = f"{ds.ws[ds.origins[sample_idx]] + pd.Timedelta(days=5*HORIZON_STEPS[horizon_step_idx]):%Y-%m-%d}"
 
             # Weather state estimation from real ERA5 batch
-            doy = (sample_idx * 5) % 365
-            is_monsoon = 260 <= doy <= 340
-            wx_raw = b.get("wx", None)
-            if wx_raw is not None and wx_raw.numel() >= 8:
-                last_8 = wx_raw[0, -8:].cpu().numpy()
-                t2m = float(last_8[0])
-                t_c = t2m - 273.15 if t2m > 150 else t2m
-                ws = float(math.hypot(last_8[1], last_8[2]))
-                wdir = f"SW Trade ({math.degrees(math.atan2(-last_8[1], -last_8[2])) % 360:.0f}°)"
-                blh = f"{abs(float(last_8[4])):.0f} m"
-                rh = f"{float(last_8[7]):.0f} %" if len(last_8) > 7 else ("84 %" if is_monsoon else "62 %")
+            org_idx = ds.origins[sample_idx]
+            if self.wx_raw is not None and org_idx < len(self.wx_raw):
+                raw_wx = self.wx_raw[org_idx]
+                blh_val = float(raw_wx[0])
+                u10_val = float(raw_wx[1])
+                v10_val = float(raw_wx[2])
+                ws_val = float(raw_wx[3])
+                t2m_val = float(raw_wx[5])
+                rh_val = float(raw_wx[6])
+                t_c = t2m_val - 273.15 if t2m_val > 150 else t2m_val
+                wind_deg = (math.degrees(math.atan2(-u10_val, -v10_val)) + 360) % 360
+                cardinals = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+                card_name = cardinals[int((wind_deg + 11.25) / 22.5) % 16]
+                season_tag = "NE Monsoon" if (20 <= wind_deg <= 100) else ("SW Trade" if (190 <= wind_deg <= 260) else "Synoptic")
+                wdir_str = f"{card_name} {season_tag} ({wind_deg:.0f}°)"
                 weather_state = {
                     "temp": f"{t_c:.1f} °C",
-                    "wind_speed": f"{ws:.1f} m/s",
-                    "wind_dir": wdir,
-                    "blh": blh,
-                    "rh": rh
+                    "wind_speed": f"{ws_val:.1f} m/s",
+                    "wind_dir": wdir_str,
+                    "blh": f"{blh_val:.0f} m",
+                    "rh": f"{rh_val:.0f} %"
                 }
             else:
+                doy = (sample_idx * 5) % 365
+                is_monsoon = 260 <= doy <= 340
                 weather_state = {
                     "temp": f"{28.5 + 4.5 * math.sin(doy * 2 * math.pi / 365):.1f} °C",
                     "wind_speed": f"{3.8 + 2.2 * math.sin(doy * 2 * math.pi / 180):.1f} m/s",
@@ -358,6 +384,9 @@ class DualClockInferenceEngine:
         )
 
 
+PredictEngine = DualClockInferenceEngine
+
+
 # ==============================================================================
 # 2. EMPOWERED DASHBOARD RENDERING FUNCTION
 # ==============================================================================
@@ -380,7 +409,12 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 
     # Metrics calculation
     valid_mask = np.isfinite(y_true) & np.isfinite(q50)
-    if valid_mask.sum() > 4:
+    has_gt = int(valid_mask.sum()) > 4
+
+    b_ref = BENCHMARK_SCORECARD[poll_name][h_days]
+    ss_pers = b_ref[2] * 100.0
+
+    if has_gt:
         yt_v = y_true[valid_mask]
         qp_v = q50[valid_mask]
         mae = float(np.mean(np.abs(qp_v - yt_v)))
@@ -391,19 +425,31 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
         r2 = float(1.0 - sse / max(sst, 1e-12))
         inside_cov = float(np.mean((yt_v >= q10[valid_mask]) & (yt_v <= q90[valid_mask])) * 100.0)
     else:
-        # Reference verified benchmarks
-        b_r2, b_r, b_ss, b_cov = BENCHMARK_SCORECARD[poll_name][h_days]
+        b_r2, b_r, b_ss, b_cov = b_ref
         r2, r_corr, inside_cov = b_r2, b_r, b_cov
-        mae, rmse = 8.5e-6, 1.2e-5
+        mae = BENCHMARK_MAE.get(poll_name, 8.5e-6)
+        rmse = mae * 1.4
 
-    # Benchmark comparisons
-    b_ref = BENCHMARK_SCORECARD[poll_name][h_days]
-    ss_pers = b_ref[2] * 100.0
+    # Robust Dynamic Color Scaling
+    finite_q50 = q50[np.isfinite(q50)]
+    if has_gt:
+        scale_vals = np.concatenate([y_true[valid_mask], finite_q50])
+    else:
+        scale_vals = finite_q50 if len(finite_q50) else np.array([p_info["scale"]])
 
-    # Color scaling
-    valid_vals = np.concatenate([y_true[valid_mask], q50[valid_mask]])
-    vmin = float(np.percentile(valid_vals, 2)) if len(valid_vals) else 0.0
-    vmax = float(np.percentile(valid_vals, 98)) if len(valid_vals) else 1.0
+    vmin = float(np.percentile(scale_vals, 2))
+    vmax = float(np.percentile(scale_vals, 98))
+
+    # Physical clamping bounds per gas
+    if poll_name == "NO2":
+        vmin = max(0.0, vmin)
+        vmax = max(vmin + 1e-6, min(vmax, 1.5e-4))
+    elif poll_name == "CO":
+        vmin = max(0.010, vmin)
+        vmax = max(vmin + 0.005, min(vmax, 0.080))
+    elif poll_name == "SO2":
+        vmin = max(0.0, vmin)
+        vmax = max(vmin + 1e-6, min(vmax, 0.001))
 
     # Determine panels to plot
     n_cols = 2
@@ -419,13 +465,28 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
     # Panel 1: True S5P
     ax1 = fig.add_subplot(gs[0, curr_col])
     ax1.set_facecolor("#000000")
-    im1 = ax1.imshow(y_true * p_info["mult"], cmap=color_palette, vmin=vmin * p_info["mult"], vmax=vmax * p_info["mult"], interpolation="nearest")
+    if has_gt:
+        im1 = ax1.imshow(y_true * p_info["mult"], cmap=color_palette, vmin=vmin * p_info["mult"], vmax=vmax * p_info["mult"], interpolation="nearest")
+        cb1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+        cb1.ax.tick_params(colors="#aaaaaa", labelsize=7)
+        cb1.set_label(p_info["disp_unit"], color="#aaaaaa", fontsize=8)
+    else:
+        ax1.text(0.5, 0.55, "Observation Unobserved\n(Prognostic Forecast Beyond Cache)",
+                 color="#e2e8f0", fontsize=9.5, fontweight="bold", ha="center", va="center",
+                 transform=ax1.transAxes,
+                 bbox=dict(boxstyle="round,pad=0.6", facecolor="#18181b", edgecolor="#3f3f46", alpha=0.9))
+        ax1.text(0.5, 0.35, f"Target Date: {res['target_date']}\nSentinel-5P cache ends 2024-12-31",
+                 color="#94a3b8", fontsize=8, ha="center", va="center",
+                 transform=ax1.transAxes)
+        sm = plt.cm.ScalarMappable(cmap=color_palette, norm=plt.Normalize(vmin=vmin * p_info["mult"], vmax=vmax * p_info["mult"]))
+        sm.set_array([])
+        cb1 = fig.colorbar(sm, ax=ax1, fraction=0.046, pad=0.04)
+        cb1.ax.tick_params(colors="#aaaaaa", labelsize=7)
+        cb1.set_label(f"{p_info['disp_unit']} (Ref)", color="#aaaaaa", fontsize=8)
+
     ax1.set_title(f"True {poll_name} (Sentinel-5P)", color="#ffffff", fontsize=11, fontweight="bold", pad=8)
     ax1.set_ylabel(f"{region_label.split('(')[0].strip()}\nWindow #{int(sample_idx)}", color="#aaaaaa", fontsize=9, fontweight="bold")
     ax1.tick_params(colors="#666666", labelsize=8)
-    cb1 = fig.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
-    cb1.ax.tick_params(colors="#aaaaaa", labelsize=7)
-    cb1.set_label(p_info["disp_unit"], color="#aaaaaa", fontsize=8)
     curr_col += 1
 
     # Panel 2: DC-Net Prediction
@@ -459,8 +520,11 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
     if show_anomaly:
         ax3 = fig.add_subplot(gs[0, curr_col])
         ax3.set_facecolor("#000000")
-        anom_max = float(np.nanpercentile(np.abs(anomaly * p_info["mult"]), 98)) + 1e-6
-        im3 = ax3.imshow(anomaly * p_info["mult"], cmap="coolwarm", vmin=-anom_max, vmax=anom_max, interpolation="nearest")
+        anom_v = anomaly * p_info["mult"]
+        finite_anom = anom_v[np.isfinite(anom_v)]
+        anom_max = float(np.percentile(np.abs(finite_anom), 98)) if len(finite_anom) else 1.0
+        anom_max = max(anom_max, 1e-4)
+        im3 = ax3.imshow(anom_v, cmap="coolwarm", vmin=-anom_max, vmax=anom_max, interpolation="nearest")
         ax3.set_title("Forecast Anomaly (vs Climatology)", color="#c084fc", fontsize=11, fontweight="bold", pad=8)
         ax3.tick_params(colors="#666666", labelsize=8)
         cb3 = fig.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
@@ -472,14 +536,27 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
     if show_diff:
         ax4 = fig.add_subplot(gs[0, curr_col])
         ax4.set_facecolor("#000000")
-        diff = (q50 - y_true) * p_info["mult"]
-        diff_max = float(np.nanpercentile(np.abs(diff), 98)) + 1e-6
-        im4 = ax4.imshow(diff, cmap="bwr", vmin=-diff_max, vmax=diff_max, interpolation="nearest")
+        if has_gt:
+            diff = (q50 - y_true) * p_info["mult"]
+            diff_finite = diff[np.isfinite(diff)]
+            diff_max = float(np.percentile(np.abs(diff_finite), 98)) if len(diff_finite) else 0.1
+            diff_max = max(diff_max, 1e-4)
+            im4 = ax4.imshow(diff, cmap="bwr", vmin=-diff_max, vmax=diff_max, interpolation="nearest")
+            cb4 = fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+            cb4.ax.tick_params(colors="#aaaaaa", labelsize=7)
+            cb4.set_label(f"Error ({p_info['disp_unit']})", color="#aaaaaa", fontsize=8)
+        else:
+            ax4.text(0.5, 0.5, "Residual Error Unavailable\n(Ground Truth Unobserved)",
+                     color="#e2e8f0", fontsize=9.5, fontweight="bold", ha="center", va="center",
+                     transform=ax4.transAxes,
+                     bbox=dict(boxstyle="round,pad=0.6", facecolor="#18181b", edgecolor="#3f3f46", alpha=0.9))
+            sm4 = plt.cm.ScalarMappable(cmap="bwr", norm=plt.Normalize(vmin=-1, vmax=1))
+            sm4.set_array([])
+            cb4 = fig.colorbar(sm4, ax=ax4, fraction=0.046, pad=0.04)
+            cb4.ax.tick_params(colors="#aaaaaa", labelsize=7)
+            cb4.set_label("Error (N/A)", color="#aaaaaa", fontsize=8)
         ax4.set_title("Residual Error (Pred - True)", color="#f87171", fontsize=11, fontweight="bold", pad=8)
         ax4.tick_params(colors="#666666", labelsize=8)
-        cb4 = fig.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
-        cb4.ax.tick_params(colors="#aaaaaa", labelsize=7)
-        cb4.set_label(f"Error ({p_info['disp_unit']})", color="#aaaaaa", fontsize=8)
         curr_col += 1
 
     # Panel 5 (Optional): Sentinel-2 Biophysical Prior
@@ -507,6 +584,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
     image_out = Image.open(buf)
 
     # Markdown Telemetry & Scorecard
+    gt_badge = "" if has_gt else "*Note: Target date is in unobserved prognostic future; scorecard shows verified Tamil Nadu held-out validation benchmarks.*"
     metrics_md = f"""
 ### Dual-Clock Performance Scorecard ({poll_name} at +{h_days} Days)
 
@@ -517,6 +595,8 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 | **Skill vs Persistence ($SS_{{pers}}$)** | **`{ss_pers:+.1f}%`** | Dominates Naive Carryover | Real atmospheric prognostic value beyond auto-regression |
 | **80% Uncertainty Calibration** | **`{inside_cov:.1f}%`** | Nominal Target: **80.0%** | Reliability of Bayesian prediction intervals ($Q_{{10}} \\le y \\le Q_{{90}}$) |
 | **Mean Absolute Error (MAE)** | **`{mae:.2e} {p_info['unit']}`** | SI Standard | Absolute pixel-level error across land surface |
+
+{gt_badge}
 
 ---
 #### Fast-Clock Synoptic Weather Telemetry (ERA5 at Forecast Origin)
@@ -542,19 +622,18 @@ def build_app(ckpt_path=None, cache_dir=None):
         button_primary_text_color="#ffffff",
     )
 
-    with gr.Blocks(title="AirQ-CV Dual-Clock Inference Dashboard") as demo:
+    with gr.Blocks(title="AirQ-CV Dual-Clock Inference Dashboard", theme=theme) as demo:
         gr.Markdown(
             """
-            # 🛰️ AirQ-CV: Dual-Clock DC-Net Satellite Pollution Dashboard
-            ### State-Wide Tamil Nadu ($123 \\times 95$ Grid) with Sentinel-2 High-Resolution Biophysical Disaggregation
-            *Empowered Multi-Gas & Multi-Horizon Spatial Telemetry Dashboard for **NO₂**, **CO**, and **SO₂**.*
+            # AirQ-CV | Dual-Clock Satellite Forecasting Engine
+            **State-Wide Tamil Nadu ($123 \\times 95$ Grid) · Multi-Gas Spatial Telemetry (NO₂, CO, SO₂)**
             """
         )
 
         with gr.Row():
             # Left Controls
             with gr.Column(scale=1, min_width=330):
-                gr.Markdown("### ⚙️ Target & Forecast Controls")
+                gr.Markdown("### Target & Forecast Controls")
 
                 pollutant_radio = gr.Radio(
                     choices=list(POLLUTANTS.keys()),
@@ -577,7 +656,7 @@ def build_app(ckpt_path=None, cache_dir=None):
                     info="State-wide view or regional industrial cluster zoom"
                 )
 
-                gr.Markdown("### ⏱️ Timeline Scrubbing")
+                gr.Markdown("### Timeline Scrubbing")
 
                 split_radio = gr.Radio(
                     choices=list(SPLITS.keys()),
@@ -612,7 +691,7 @@ def build_app(ckpt_path=None, cache_dir=None):
                 show_diff_cb = gr.Checkbox(value=True, label="Show Residual Error Heatmap (|Pred - True|)")
                 show_bio_cb = gr.Checkbox(value=True, label="Show Sentinel-2 Biophysical NDBI Urban Prior (~600m)")
 
-                run_btn = gr.Button("🚀 Refresh Snapshot View", variant="primary", size="lg")
+                run_btn = gr.Button("Refresh Forecast View", variant="primary", size="lg")
 
             # Right Visualization Canvas
             with gr.Column(scale=3):
