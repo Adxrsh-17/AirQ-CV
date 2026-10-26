@@ -164,7 +164,11 @@ class DualClockInferenceEngine:
 
     def _load_live_model(self):
         ckpt = torch.load(self.ckpt_path, map_location=self.dev, weights_only=False)
-        cfg = ckpt["cfg"]
+        cfg = dict(ckpt["cfg"])
+        if "splits" in cfg:
+            cfg_splits = dict(cfg["splits"])
+            cfg_splits["test"] = ["2025-01-01", "2026-10-15"]
+            cfg["splits"] = cfg_splits
 
         for split_label, split_key in SPLITS.items():
             try:
@@ -197,9 +201,9 @@ class DualClockInferenceEngine:
             date_strings = [f"{ds.ws[o]:%Y-%m-%d} to {ds.we[o]:%Y-%m-%d}" for o in ds.origins]
             return n_samples, date_strings
         else:
-            counts = {"train": 365, "val": 73, "test": 131}
+            counts = {"train": 354, "val": 73, "test": 130}
             n_samples = counts.get(split_key, 73)
-            base_years = {"train": 2021, "val": 2024, "test": 2025}
+            base_years = {"train": 2019, "val": 2024, "test": 2025}
             y = base_years.get(split_key, 2024)
             date_strings = [f"{pd.Timestamp(f'{y}-01-01') + pd.Timedelta(days=5*i):%Y-%m-%d}" for i in range(n_samples)]
             return n_samples, date_strings
@@ -607,7 +611,9 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 * **Boundary Layer Height (BLH):** `{wx['blh']}` (Atmospheric Dispersion Depth) | **Relative Humidity:** `{wx['rh']}`
 """
 
-    return image_out, metrics_md
+    badge_text = f"📅 **Active Window #{int(sample_idx)}** | **Origin:** `{res['origin_date']}`  ⟶  **Forecast Target:** `{res['target_date']}` (`{horizon_label}`)"
+
+    return image_out, metrics_md, badge_text
 
 
 # ==============================================================================
@@ -669,7 +675,7 @@ def build_app(ckpt_path=None, cache_dir=None):
                     info="Val: 2024 Held-out, Test: 2025-2026 Extended, Train: 2019-2023"
                 )
 
-                n_init, _ = engine.get_split_info("val")
+                n_init, init_dates = engine.get_split_info("val")
 
                 step_slider = gr.Slider(
                     minimum=0,
@@ -679,6 +685,8 @@ def build_app(ckpt_path=None, cache_dir=None):
                     label="5-Day Observation Window Slider",
                     info=f"Window Index (Total: {n_init} five-day epochs)"
                 )
+
+                date_badge = gr.Markdown("📅 **Active Window:** Initializing...")
 
                 with gr.Row():
                     prev_btn = gr.Button("◀ Prev", size="sm")
@@ -705,12 +713,14 @@ def build_app(ckpt_path=None, cache_dir=None):
         # Callbacks
         def on_split_change(split_label):
             s_key = SPLITS.get(split_label, "val")
-            n_samp, _ = engine.get_split_info(s_key)
+            n_samp, date_strings = engine.get_split_info(s_key)
             new_max = max(1, n_samp - 1)
             default_val = min(42, new_max)
-            return gr.update(maximum=new_max, value=default_val, info=f"Window Index (Total: {n_samp} epochs)")
+            dt_str = date_strings[default_val] if default_val < len(date_strings) else ""
+            badge_text = f"📅 **Active Window #{default_val} ({split_label}):** `{dt_str}`"
+            return gr.update(maximum=new_max, value=default_val, info=f"Window Index (Total: {n_samp} epochs)"), badge_text
 
-        split_radio.change(on_split_change, inputs=[split_radio], outputs=[step_slider])
+        split_radio.change(on_split_change, inputs=[split_radio], outputs=[step_slider, date_badge])
 
         def on_prev(cur_val): return max(0, int(cur_val) - 1)
         def on_next(cur_val, split_label):
@@ -729,17 +739,19 @@ def build_app(ckpt_path=None, cache_dir=None):
         def trigger_render(s_rad, s_step, h_drop, p_rad, r_drop, anom, diff, bio, pal):
             return render_dashboard(engine, s_rad, s_step, h_drop, p_rad, r_drop, anom, diff, bio, pal)
 
-        run_btn.click(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        step_slider.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        horizon_dropdown.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        pollutant_radio.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        region_dropdown.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        show_anom_cb.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        show_diff_cb.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        show_bio_cb.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
-        palette_dropdown.change(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
+        render_outputs = [plot_output, metrics_output, date_badge]
 
-        demo.load(trigger_render, inputs=render_inputs, outputs=[plot_output, metrics_output])
+        run_btn.click(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        step_slider.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        horizon_dropdown.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        pollutant_radio.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        region_dropdown.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        show_anom_cb.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        show_diff_cb.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        show_bio_cb.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+        palette_dropdown.change(trigger_render, inputs=render_inputs, outputs=render_outputs)
+
+        demo.load(trigger_render, inputs=render_inputs, outputs=render_outputs)
 
     return demo
 
