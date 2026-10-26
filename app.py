@@ -611,7 +611,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 * **Boundary Layer Height (BLH):** `{wx['blh']}` (Atmospheric Dispersion Depth) | **Relative Humidity:** `{wx['rh']}`
 """
 
-    badge_text = f"📅 **Active Window #{int(sample_idx)}** | **Origin:** `{res['origin_date']}`  ⟶  **Forecast Target:** `{res['target_date']}` (`{horizon_label}`)"
+    badge_text = f"**Observation Window #{int(sample_idx)}** | **Origin:** `{res['origin_date']}`  ⟶  **Forecast Target:** `{res['target_date']}` (`{horizon_label}`)"
 
     return image_out, metrics_md, badge_text
 
@@ -686,7 +686,7 @@ def build_app(ckpt_path=None, cache_dir=None):
                     info=f"Window Index (Total: {n_init} five-day epochs)"
                 )
 
-                date_badge = gr.Markdown("📅 **Active Window:** Initializing...")
+                date_badge = gr.Markdown("**Observation Window:** Initializing...")
 
                 with gr.Row():
                     prev_btn = gr.Button("◀ Prev", size="sm")
@@ -717,7 +717,7 @@ def build_app(ckpt_path=None, cache_dir=None):
             new_max = max(1, n_samp - 1)
             default_val = min(42, new_max)
             dt_str = date_strings[default_val] if default_val < len(date_strings) else ""
-            badge_text = f"📅 **Active Window #{default_val} ({split_label}):** `{dt_str}`"
+            badge_text = f"**Observation Window #{default_val} ({split_label}):** `{dt_str}`"
             return gr.update(maximum=new_max, value=default_val, info=f"Window Index (Total: {n_samp} epochs)"), badge_text
 
         split_radio.change(on_split_change, inputs=[split_radio], outputs=[step_slider, date_badge])
