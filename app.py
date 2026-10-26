@@ -576,11 +576,9 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
         cb5 = fig.colorbar(im5, ax=ax5, fraction=0.046, pad=0.04)
         cb5.ax.tick_params(colors="#aaaaaa", labelsize=7)
         cb5.set_label("NDBI Index [-1, 1]", color="#aaaaaa", fontsize=8)
-        curr_col += 1
-
-    # Overall Supertitle
+          # Overall Supertitle
     fig.suptitle(
-        f"AirQ-CV | {p_info['name']} ({poll_name}) | Origin: {res['origin_date']}  ⟶  Target: {res['target_date']} ({horizon_label})",
+        f"AirQ-CV | {p_info['name']} ({poll_name}) | Origin: {res['origin_date']}  -->  Target: {res['target_date']} ({horizon_label})",
         color="#ffffff", fontsize=13, fontweight="bold", y=0.97
     )
 
@@ -611,7 +609,7 @@ def render_dashboard(engine, split_label, sample_idx, horizon_label, poll_name, 
 * **Boundary Layer Height (BLH):** `{wx['blh']}` (Atmospheric Dispersion Depth) | **Relative Humidity:** `{wx['rh']}`
 """
 
-    badge_text = f"**Observation Window #{int(sample_idx)}** | **Origin:** `{res['origin_date']}`  ⟶  **Forecast Target:** `{res['target_date']}` (`{horizon_label}`)"
+    badge_text = f"**Observation Window #{int(sample_idx)}** | **Origin:** `{res['origin_date']}`  -->  **Forecast Target:** `{res['target_date']}` ({horizon_label})"
 
     return image_out, metrics_md, badge_text
 
